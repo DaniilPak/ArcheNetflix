@@ -1,61 +1,63 @@
-//
-//  ContentView.swift
-//  ArcheNetflix
-//
-//  Created by Daniil Pak on 16.10.2026.
-//
-
 import SwiftUI
-import SwiftData
 
 struct ContentView: View {
-    @Environment(\.modelContext) private var modelContext
-    @Query private var items: [Item]
+    @State private var store = Store()
+    @State private var showPalette = false
+    @State private var showMissions = false
+    @State private var showCosts = false
+    @State private var showBrief = !UserDefaults.standard.bool(forKey: "briefSeen")
+    @State private var showLog = false
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(items) { item in
-                    NavigationLink {
-                        Text("Item at \(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))")
-                    } label: {
-                        Text(item.timestamp, format: Date.FormatStyle(date: .numeric, time: .standard))
+        GeometryReader { geo in
+            let wide = geo.size.width > 700
+            ZStack {
+                BoardView(store: store).ignoresSafeArea()
+                VStack(spacing: 8) {
+                    HUD(store: store, onMissions: { showMissions = true }, onCosts: { showCosts = true })
+                        .frame(maxWidth: 520)
+                        .frame(maxWidth: .infinity, alignment: wide ? .leading : .center)
+                    if let toast = store.toast {
+                        Banner(text: toast, color: Theme.yellow, icon: "info.circle.fill").frame(maxWidth: 520)
+                            .transition(.opacity)
                     }
-                }
-                .onDelete(perform: deleteItems)
-            }
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    EditButton()
-                }
-                ToolbarItem {
-                    Button(action: addItem) {
-                        Label("Add Item", systemImage: "plus")
+                    Spacer()
+                    VStack(spacing: 8) {
+                        if showLog { LogPanel(store: store).transition(.move(edge: .bottom).combined(with: .opacity)) }
+                        if let node = store.selected {
+                            Inspector(store: store, node: node)
+                                .id(node.id)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                        BottomBar(store: store, showLog: $showLog, onAdd: { showPalette = true })
                     }
+                    .frame(maxWidth: 520)
+                    .frame(maxWidth: .infinity, alignment: wide ? .leading : .center)
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 4)
+                .animation(.easeOut(duration: 0.2), value: store.selection)
+                .animation(.easeOut(duration: 0.2), value: store.toast)
+
+                if let victory = store.victory {
+                    Color.black.opacity(0.55).ignoresSafeArea().transition(.opacity)
+                    VictoryCard(store: store, victory: victory, onNext: { showBrief = true })
+                        .transition(.scale(scale: 0.9).combined(with: .opacity))
                 }
             }
-        } detail: {
-            Text("Select an item")
+            .animation(.spring(duration: 0.35), value: store.victory?.id)
         }
-    }
-
-    private func addItem() {
-        withAnimation {
-            let newItem = Item(timestamp: Date())
-            modelContext.insert(newItem)
-        }
-    }
-
-    private func deleteItems(offsets: IndexSet) {
-        withAnimation {
-            for index in offsets {
-                modelContext.delete(items[index])
-            }
-        }
+        .foregroundStyle(.white)
+        .background(Theme.bg)
+        .task { await store.run() }
+        .sheet(isPresented: $showPalette) { PaletteSheet(store: store) }
+        .sheet(isPresented: $showMissions) { MissionsSheet(store: store, onBrief: { showBrief = true }) }
+        .sheet(isPresented: $showCosts) { CostSheet(store: store) }
+        .sheet(isPresented: $showBrief, onDismiss: { UserDefaults.standard.set(true, forKey: "briefSeen") }) { BriefSheet(store: store) }
+        .sensoryFeedback(.error, trigger: store.live.status == .down && store.hasStarted)
+        .sensoryFeedback(.success, trigger: store.victory?.id)
+        .sensoryFeedback(.impact(weight: .light), trigger: store.design.edges.count)
     }
 }
 
-#Preview {
-    ContentView()
-        .modelContainer(for: Item.self, inMemory: true)
-}
+#Preview { ContentView().preferredColorScheme(.dark) }
