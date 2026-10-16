@@ -34,7 +34,6 @@ final class Store {
     private(set) var costs: [CostLine] = []
     private(set) var logs: [LogLine] = []
     private(set) var history: [Double] = []
-    private var runClean = false
     private var runMin = 1.0
     private var lastPhase = ""
     private var lastStatus: Status?
@@ -43,17 +42,20 @@ final class Store {
     var victory: Victory?
     var toast: String?
     var pendingLink: (from: UUID, point: CGPoint)?
+    var hint: Hint?
+    private(set) var hintLoading = false
 
-    /// Seconds of real time one event takes at 1×.
-    static let eventDuration = 75.0
+    /// Best stars earned per mission id.
+    private(set) var best: [String: Int] = UserDefaults.standard.dictionary(forKey: "bestStars") as? [String: Int] ?? [:]
 
     init() {
-        let id = UserDefaults.standard.string(forKey: "mission") ?? Mission.all[1].id
-        let m = Mission.all.first { $0.id == id } ?? Mission.all[1]
+        let id = UserDefaults.standard.string(forKey: "mission") ?? Mission.all[0].id
+        let m = Mission.all.first { $0.id == id } ?? Mission.all[0]
         mission = m
         design = Store.load(m)
         #if DEBUG
         let args = ProcessInfo.processInfo.arguments
+        if args.contains("-unlockAll") { for m in Mission.all { best[m.id] = max(best[m.id] ?? 0, 1) } }
         if args.contains("-demo") || args.contains("-demoFail") { design = .demo(failing: args.contains("-demoFail")) }
         #endif
         log(.info, "Event “\(m.title)” loaded · peak \(Fmt.viewers(m.peakViewers)) viewers")
@@ -65,6 +67,18 @@ final class Store {
     var stars: Int { monthly <= mission.budget ? 3 : monthly <= mission.budget * 1.5 ? 2 : 1 }
     var selected: Node? { design.node(selection) }
     var hasStarted: Bool { design.nodes.count > 1 }
+
+    /// Missions open up one at a time: clear the previous one to play the next.
+    func isUnlocked(_ m: Mission) -> Bool {
+        guard let i = Mission.all.firstIndex(where: { $0.id == m.id }), i > 0 else { return true }
+        return (best[Mission.all[i - 1].id] ?? 0) > 0
+    }
+
+    /// Index of the first tutorial step not yet done (steps.count once the build steps are all done).
+    var tutorialStep: Int {
+        let steps = mission.steps
+        return steps.firstIndex { !$0.done(design) } ?? steps.count
+    }
 
     // MARK: Missions & persistence
 
@@ -101,7 +115,8 @@ final class Store {
 
     private func changed() {
         recompute()
-        runClean = false
+        // Edits restart the live check; the forecast already covers the whole event curve.
+        runMin = hasStarted ? live.health : 0
         save()
     }
 
@@ -122,6 +137,10 @@ final class Store {
             let siblings = design.edges.filter { $0.from == a.id }.count
             position = CGPoint(x: a.x + 170, y: a.y + Double(siblings) * 130)
         }
+        // An encoder has no traffic parent; drop it beside the origin it should feed.
+        if anchor == nil, kind == .mediaLive, let origin = design.nodes.first(where: { $0.spec.role == .origin }) {
+            position = CGPoint(x: origin.x - 170, y: origin.y - 120)
+        }
         while design.nodes.contains(where: { abs($0.x - position.x) < 120 && abs($0.y - position.y) < 120 }) { position.y += 130 }
         let node = Node(kind: kind, x: position.x, y: position.y, count: spec.defaultCount, tier: kind == .ec2 ? 1 : 0, index: index)
         design.nodes.append(node)
@@ -139,8 +158,8 @@ final class Store {
         let p = screenPoint(n.position)
         // With the inspector open only a strip between the HUD and the panel is visible.
         let visible = selection == nil
-            ? CGRect(x: 90, y: boardSize.height * 0.42, width: boardSize.width - 180, height: boardSize.height * 0.16)
-            : CGRect(x: 90, y: boardSize.height * 0.31, width: boardSize.width - 180, height: boardSize.height * 0.11)
+            ? CGRect(x: 90, y: boardSize.height * 0.5, width: boardSize.width - 180, height: boardSize.height * 0.2)
+            : CGRect(x: 90, y: boardSize.height * (mission.isTutorial ? 0.36 : 0.3), width: boardSize.width - 180, height: boardSize.height * 0.08)
         guard !visible.contains(p) else { return }
         let dx = p.x < visible.minX ? visible.minX - p.x : p.x > visible.maxX ? visible.maxX - p.x : 0
         let dy = p.y < visible.minY ? visible.minY - p.y : p.y > visible.maxY ? visible.maxY - p.y : 0
@@ -191,7 +210,7 @@ final class Store {
         guard let a = design.node(from), let b = design.node(to), from != to else { return "" }
         if b.kind == .viewers { return "Viewers only send traffic." }
         if design.edges.contains(where: { $0.from == from && $0.to == to }) { return "Already connected." }
-        if a.kind == .mediaLive && b.spec.role != .origin { return "MediaLive pushes its stream to MediaPackage or S3." }
+        if a.kind == .mediaLive && (b.spec.role != .origin || b.spec.builtInLive) { return "MediaLive pushes its stream to MediaPackage or S3." }
         if b.kind == .mediaLive { return "MediaLive takes the arena camera feed, not traffic." }
         if a.spec.role == .database || a.spec.role == .origin { return "\(a.spec.name) is a final stop — it doesn't forward traffic." }
         return nil
@@ -209,6 +228,20 @@ final class Store {
     func unlink(_ edge: UUID) {
         design.edges.removeAll { $0.id == edge }
         changed()
+    }
+
+    func requestHint() {
+        guard !hintLoading else { return }
+        hintLoading = true
+        hint = nil
+        Task {
+            let result = await Hints.next(design: design, mission: mission, forecast: forecast, costs: costs, tutorialStep: tutorialStep)
+            withAnimation(.easeOut(duration: 0.2)) {
+                hint = result
+                hintLoading = false
+            }
+            log(.info, "Hint: \(result.text)")
+        }
     }
 
     func show(_ message: String) {
@@ -253,11 +286,11 @@ final class Store {
         let xs = design.nodes.map(\.x), ys = design.nodes.map(\.y)
         guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else { return }
         let w = maxX - minX + 200, h = maxY - minY + 220
-        let usable = CGSize(width: boardSize.width, height: boardSize.height * 0.55)
+        let usable = CGSize(width: boardSize.width, height: boardSize.height * 0.4)
         withAnimation(.spring(duration: 0.4)) {
             scale = min(1.2, max(0.25, min(usable.width / w, usable.height / h)))
             offset = CGSize(width: boardSize.width / 2 - (minX + maxX) / 2 * scale,
-                            height: boardSize.height * 0.45 - (minY + maxY) / 2 * scale)
+                            height: boardSize.height * 0.62 - (minY + maxY) / 2 * scale)
         }
     }
 
@@ -280,7 +313,6 @@ final class Store {
         progress = 0
         history = []
         runMin = 1
-        runClean = true
         hot = []
         tickSolve()
     }
@@ -289,19 +321,21 @@ final class Store {
         while !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(100))
             guard playing, victory == nil else { continue }
-            progress += 0.1 / Store.eventDuration * speed
+            progress += 0.1 / mission.realSeconds * speed
             jitter = min(1.03, max(0.97, jitter + Double.random(in: -0.006...0.006)))
             if progress >= 1 { finishEvent() } else { tickSolve() }
         }
     }
 
     private func finishEvent() {
-        let survived = runClean && runMin >= 0.995 && hasStarted
+        let survived = hasStarted && runMin >= 0.995 && forecast.minHealth >= 0.995
         if survived {
             log(.ok, "Event complete. Every viewer got the fight. Bill: \(Fmt.money(monthly))/mo")
             victory = Victory(cost: monthly, stars: stars)
+            best[mission.id] = max(best[mission.id] ?? 0, stars)
+            UserDefaults.standard.set(best, forKey: "bestStars")
         } else {
-            log(.info, runClean ? "Event ended · worst health \(Fmt.percent(runMin)). Replaying…" : "Event ended · design changed mid-event. Replaying to certify…")
+            log(.info, "Event ended · worst health \(Fmt.percent(min(runMin, forecast.minHealth))). Replaying…")
         }
         restartEvent()
     }

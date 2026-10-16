@@ -10,8 +10,10 @@ struct HUD: View {
     var body: some View {
         VStack(spacing: 8) {
             header
-            StatusCard(store: store)
-            if store.selection == nil, let issue = store.forecast.worst.issues.first(where: { $0.severity == .failure }) ?? (store.hasStarted ? nil : store.live.issues.first) {
+            StatusCard(store: store, compact: store.selection != nil)
+            if store.mission.isTutorial {
+                TutorialCard(store: store, compact: store.selection != nil)
+            } else if store.selection == nil, let issue = store.forecast.worst.issues.first(where: { $0.severity == .failure }) ?? (store.hasStarted ? nil : store.live.issues.first) {
                 Button { store.focus(issue.node) } label: {
                     Banner(text: issue.text, color: Theme.orange, icon: "exclamationmark.triangle.fill")
                 }
@@ -55,6 +57,8 @@ struct HUD: View {
 
 struct StatusCard: View {
     let store: Store
+    /// Just the headline row, to leave room for the board while the inspector is open.
+    var compact = false
 
     var body: some View {
         let live = store.live
@@ -81,13 +85,15 @@ struct StatusCard: View {
                     .background(RoundedRectangle(cornerRadius: 4).fill(status == .holding ? .white : color.opacity(0.9)))
                     HStack(spacing: 8) {
                         metric("play.rectangle.fill", live.video)
-                        metric("bolt.fill", live.api)
+                        if store.mission.hasAPI { metric("bolt.fill", live.api) }
                     }
                 }
             }
-            Sparkline(values: store.history, progress: store.progress)
-                .frame(height: 26)
-            forecastRow
+            if !compact {
+                Sparkline(values: store.history, progress: store.progress)
+                    .frame(height: 26)
+                forecastRow
+            }
         }
         .padding(12)
         .background(Theme.panel)
@@ -170,6 +176,74 @@ struct Banner: View {
     }
 }
 
+/// Guided checklist for the tutorial mission. Steps tick off as the design satisfies them.
+struct TutorialCard: View {
+    let store: Store
+    var compact = false
+
+    var body: some View {
+        let steps = store.mission.steps
+        let current = min(store.tutorialStep, steps.count - 1)
+        let step = steps[current]
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("STEP \(current + 1) OF \(steps.count)").font(.system(size: 10, weight: .heavy)).tracking(0.6).foregroundStyle(Difficulty.tutorial.color)
+                Spacer()
+                HStack(spacing: 4) {
+                    ForEach(0..<steps.count, id: \.self) { i in
+                        Capsule().fill(i < current ? Theme.green : i == current ? Difficulty.tutorial.color : Theme.raised)
+                            .frame(width: i == current ? 18 : 8, height: 6)
+                    }
+                }
+            }
+            HStack(spacing: 10) {
+                Image(systemName: current == steps.count - 1 ? "flag.checkered" : "hand.point.up.left.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .frame(width: 30, height: 30)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Difficulty.tutorial.color.opacity(0.25)))
+                    .foregroundStyle(Difficulty.tutorial.color)
+                Text(step.title).font(.system(size: 16, weight: .heavy))
+            }
+            Text(step.hint).font(.system(size: compact ? 12 : 13)).foregroundStyle(Theme.soft)
+                .lineLimit(compact ? 2 : nil)
+                .fixedSize(horizontal: false, vertical: !compact)
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.panel).strokeBorder(Difficulty.tutorial.color.opacity(0.4)))
+        .animation(.spring(duration: 0.35), value: current)
+        .id("tutorial")
+    }
+}
+
+/// "What next?" advice from the Hint button.
+struct HintCard: View {
+    let store: Store
+    let hint: Hint
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: "lightbulb.fill").foregroundStyle(Theme.yellow)
+                Text("NEXT STEP").font(.system(size: 11, weight: .heavy)).tracking(0.6).foregroundStyle(Theme.yellow)
+                Text(hint.fromAI ? "AI architect" : "Simulator").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.muted)
+                    .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Theme.raised))
+                Spacer()
+                Button { withAnimation(.easeOut(duration: 0.2)) { store.hint = nil } } label: {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .heavy)).foregroundStyle(Theme.muted).frame(width: 28, height: 28)
+                }
+                .accessibilityLabel("Dismiss hint")
+            }
+            Text(hint.text).font(.system(size: 14)).foregroundStyle(Theme.soft).fixedSize(horizontal: false, vertical: true)
+            if let node = hint.node, store.design.node(node) != nil {
+                Button { store.focus(node) } label: { Label("Show me", systemImage: "scope").font(.system(size: 13, weight: .bold)) }
+                    .foregroundStyle(Theme.greenHi)
+            }
+        }
+        .padding(12)
+        .background(HStack(spacing: 0) { Theme.yellow.frame(width: 4); Theme.panel }.clipShape(RoundedRectangle(cornerRadius: 8)))
+    }
+}
+
 // MARK: - Bottom bar
 
 struct BottomBar: View {
@@ -179,8 +253,15 @@ struct BottomBar: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Button(action: onAdd) { Label("Add service", systemImage: "plus") }
+            Button(action: onAdd) { Label("Add", systemImage: "plus") }
                 .buttonStyle(PrimaryButtonStyle())
+            Button { store.requestHint() } label: {
+                if store.hintLoading { ProgressView().tint(Theme.yellow) } else { Image(systemName: "lightbulb.fill").foregroundStyle(Theme.yellow) }
+            }
+            .buttonStyle(SecondaryButtonStyle(height: 46, expand: false))
+            .frame(width: 52)
+            .disabled(store.hintLoading)
+            .accessibilityLabel("Hint: what should I do next?")
             Button { store.playing.toggle() } label: { Image(systemName: store.playing ? "pause.fill" : "play.fill") }
                 .buttonStyle(SecondaryButtonStyle(height: 46, expand: false))
                 .frame(width: 52)
@@ -306,7 +387,7 @@ struct Inspector: View {
 
     private var primary: [TrafficClass] {
         switch node.spec.role {
-        case .cdn: [.video, .api]
+        case .cdn: store.mission.hasAPI ? [.video, .api] : [.video]
         case .origin: [.video]
         case .cache: [.reads]
         case .queue: [.writes]

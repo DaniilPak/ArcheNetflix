@@ -47,7 +47,7 @@ enum Solver {
 
     /// How many units of a node actually receive traffic.
     static func effectiveCount(_ n: Node, parents: [Node]) -> Int {
-        if (n.kind == .ec2 || n.kind == .fargate) && !parents.contains(where: { $0.kind.isLoadBalancer }) { return min(n.count, 1) }
+        if n.spec.needsLoadBalancer && !parents.contains(where: { $0.kind.isLoadBalancer }) { return min(n.count, 1) }
         return n.count
     }
 
@@ -62,10 +62,10 @@ enum Solver {
         case .firewall: cap[.api] = unit; cap[.video] = .infinity
         case .cdn: cap[.video] = c * unit; cap[.api] = c * cdnAPIPerUnit
         case .cache: cap[.reads] = c * unit
-        case .queue: cap[.writes] = .infinity
+        case .queue: cap[.writes] = c * unit
         case .origin: cap[.video] = c * unit
         case .database:
-            if n.kind == .aurora && count > 1 {
+            if n.spec.singleWriter && count > 1 {
                 cap[.writes] = unit
                 cap[.reads] = Double(count - 1) * unit
             } else {
@@ -76,7 +76,7 @@ enum Solver {
         return cap
     }
 
-    static func shared(_ n: Node, count: Int) -> Bool { n.spec.role == .database && !(n.kind == .aurora && count > 1) }
+    static func shared(_ n: Node, count: Int) -> Bool { n.spec.role == .database && !(n.spec.singleWriter && count > 1) }
 
     static func run(_ design: Design, _ demand: Demand) -> SimResult {
         var result = SimResult(demand: demand)
@@ -206,7 +206,7 @@ enum Solver {
             case .queue: succ[.writes] = ratio(.writes) * down(.writes)
             case .database: succ[.reads] = ratio(.reads); succ[.writes] = ratio(.writes)
             case .origin:
-                let live = (parents[id] ?? []).contains { $0.kind == .mediaLive }
+                let live = n.spec.builtInLive || (parents[id] ?? []).contains { $0.kind == .mediaLive }
                 succ[.video] = live ? ratio(.video) : 0
             case .encoder: break
             }
@@ -240,7 +240,7 @@ enum Solver {
             }
             if s.util > 1.0001 {
                 let need = Int((Double(s.effectiveCount) * s.util * 1.05).rounded(.up))
-                if n.kind == .aurora && n.count > 1 && s.incoming[.writes] > s.capacity[.writes] {
+                if n.spec.singleWriter && n.count > 1 && s.incoming[.writes] > s.capacity[.writes] {
                     list.append(Issue(severity: .failure, node: n.id, text: "\(n.title)'s single writer is at \(Fmt.percent(s.incoming[.writes] / s.capacity[.writes])). Replicas can't take writes — upgrade the tier, add SQS, or use DynamoDB."))
                 } else if n.kind == .waf {
                     list.append(Issue(severity: .failure, node: n.id, text: "\(n.title) is at \(Fmt.percent(s.util))."))
@@ -252,7 +252,7 @@ enum Solver {
             if s.effectiveCount < n.count && s.incoming[.api] > 0 {
                 list.append(Issue(severity: .failure, node: n.id, text: "Only 1 of \(n.count) \(n.title) \(n.spec.unit) gets traffic. Put a Load Balancer in front."))
             }
-            if n.spec.role == .origin && s.incoming[.video] > 0 && !(parents[n.id] ?? []).contains(where: { $0.kind == .mediaLive }) {
+            if n.spec.role == .origin && !n.spec.builtInLive && s.incoming[.video] > 0 && !(parents[n.id] ?? []).contains(where: { $0.kind == .mediaLive }) {
                 list.append(Issue(severity: .failure, node: n.id, text: "\(n.title) has no live feed. Add MediaLive and connect it → \(n.title)."))
             }
             if n.kind == .mediaLive && (kids[n.id] ?? []).isEmpty {
@@ -312,7 +312,7 @@ enum Pricing {
         let hoursFactor = design.scheduledScaling ? min(1, (m.eventHours + scheduledHoursPerEvent) / 730) : 1
         return design.nodes.filter { $0.kind != .viewers }.map { n in
             let s = peak.stats[n.id] ?? NodeStat()
-            var fixed = Double(n.count) * n.tierSpec.monthly * (n.spec.schedulable ? hoursFactor : 1)
+            var fixed = Double(n.count) * n.tierSpec.monthly * (n.spec.schedulable ? hoursFactor : 1) + n.spec.baseMonthly
             let million = seconds / 1e6
             var usage = 0.0
             switch n.kind {
@@ -328,6 +328,14 @@ enum Pricing {
             case .dynamoDB: usage = (s.served[.reads] * 0.125 + s.served[.writes] * 0.625) * million
             case .sqs: usage = s.served[.writes] * million * 0.80
             case .mediaPackage: usage = s.served[.video] * seconds / 8 * 0.03
+            case .nlb: usage = s.served[.api] / 1000 * 0.006 * seconds / 3600
+            case .globalAccelerator: usage = s.served[.api] * 4e-6 * seconds * 0.015
+            case .auroraDSQL: usage = (s.served[.reads] * 0.40 + s.served[.writes] * 1.60) * million
+            case .kinesis: usage = s.served[.writes] * million * 0.16
+            case .ivs:
+                // Viewer-hours at ~1080p plus the channel's input hours.
+                let viewers = s.served[.video] * 1000 / m.bitrateMbps
+                usage = viewers * seconds / 3600 * 0.0375 + m.eventHours * 2
             case .s3: usage = s.served[.video] * 1e9 / 8 / 2.5e6 * million * 0.4
             default: break
             }

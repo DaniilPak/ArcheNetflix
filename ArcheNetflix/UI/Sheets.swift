@@ -11,6 +11,12 @@ struct PaletteSheet: View {
                     if let anchor = store.selected, anchor.spec.role != .database, anchor.spec.role != .origin {
                         Banner(text: "Adds after \(anchor.title) and connects it automatically.", color: Theme.green, icon: "link")
                     }
+                    if store.mission.steps.indices.contains(store.tutorialStep), let kind = store.mission.steps[store.tutorialStep].suggested {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("SUGGESTED FOR THIS STEP").font(.system(size: 11, weight: .bold)).tracking(0.6).foregroundStyle(Difficulty.tutorial.color)
+                            cell(kind)
+                        }
+                    }
                     ForEach(Category.allCases, id: \.self) { cat in
                         let kinds = ServiceKind.buildable.filter { $0.spec.category == cat }
                         if !kinds.isEmpty {
@@ -65,37 +71,60 @@ struct MissionsSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmReset = false
 
+    private func missionCard(_ m: Mission) -> some View {
+        let current = m.id == store.mission.id
+        let unlocked = store.isUnlocked(m)
+        let stars = store.best[m.id] ?? 0
+        return Button {
+            if !current { store.choose(m) }
+            dismiss()
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(m.difficulty.rawValue.uppercased()).font(.system(size: 10, weight: .heavy)).tracking(0.6)
+                        .foregroundStyle(Color(hex: 0x2b2a27))
+                        .padding(.horizontal, 7).padding(.vertical, 3).background(Capsule().fill(m.difficulty.color))
+                    Text(m.title).font(.system(size: 18, weight: .heavy))
+                    Spacer()
+                    if !unlocked {
+                        Image(systemName: "lock.fill").foregroundStyle(Theme.muted)
+                    } else if current {
+                        Text("PLAYING").font(.system(size: 10, weight: .heavy)).tracking(0.6).foregroundStyle(Color(hex: 0x2b2a27))
+                            .padding(.horizontal, 7).padding(.vertical, 3).background(Capsule().fill(.white))
+                    }
+                    if stars > 0 {
+                        HStack(spacing: 1) {
+                            ForEach(0..<3) { i in Image(systemName: i < stars ? "star.fill" : "star").font(.system(size: 11, weight: .bold)) }
+                        }
+                        .foregroundStyle(Theme.yellow)
+                    }
+                }
+                Text("\(Fmt.viewers(m.peakViewers)) viewers · \(Int(m.bitrateMbps)) Mbps · \(Int(m.eventHours)) h event").font(.system(size: 12, weight: .bold)).foregroundStyle(m.difficulty.color)
+                Text(unlocked ? m.brief : "Clear \(previous(m)?.title ?? "the previous event") to unlock.").font(.system(size: 13)).foregroundStyle(Theme.soft).multilineTextAlignment(.leading)
+                if unlocked {
+                    Text("★★★ budget \(Fmt.money(m.budget))/mo").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
+                }
+            }
+            .foregroundStyle(.white)
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.panel).strokeBorder(current ? Theme.green : .clear, lineWidth: 2))
+            .opacity(unlocked ? 1 : 0.55)
+        }
+        .buttonStyle(.plain)
+        .disabled(!unlocked)
+    }
+
+    private func previous(_ m: Mission) -> Mission? {
+        guard let i = Mission.all.firstIndex(where: { $0.id == m.id }), i > 0 else { return nil }
+        return Mission.all[i - 1]
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 10) {
-                    ForEach(Mission.all) { m in
-                        let current = m.id == store.mission.id
-                        Button {
-                            if !current { store.choose(m) }
-                            dismiss()
-                        } label: {
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Text(m.title).font(.system(size: 18, weight: .heavy))
-                                    Spacer()
-                                    if current {
-                                        Text("PLAYING").font(.system(size: 10, weight: .heavy)).tracking(0.6).foregroundStyle(Color(hex: 0x2b2a27))
-                                            .padding(.horizontal, 7).padding(.vertical, 3).background(Capsule().fill(Theme.greenHi))
-                                    }
-                                }
-                                Text(m.tagline).font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.greenHi)
-                                Text(m.brief).font(.system(size: 13)).foregroundStyle(Theme.soft).multilineTextAlignment(.leading)
-                                Text("★★★ budget \(Fmt.money(m.budget))/mo · \(Int(m.bitrateMbps)) Mbps · \(Int(m.eventHours)) h event")
-                                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
-                            }
-                            .foregroundStyle(.white)
-                            .padding(14)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(RoundedRectangle(cornerRadius: 8).fill(Theme.panel).strokeBorder(current ? Theme.green : .clear, lineWidth: 2))
-                        }
-                        .buttonStyle(.plain)
-                    }
+                    ForEach(Mission.all) { m in missionCard(m) }
                     HStack(spacing: 8) {
                         Button { dismiss(); onBrief() } label: { Label("Mission brief", systemImage: "doc.text") }
                             .buttonStyle(SecondaryButtonStyle())
@@ -202,9 +231,17 @@ struct BriefSheet: View {
         VStack(alignment: .leading, spacing: 14) {
             Image(systemName: "dot.radiowaves.left.and.right").font(.system(size: 22, weight: .bold))
                 .frame(width: 46, height: 46).background(RoundedRectangle(cornerRadius: 8).fill(Theme.green))
-            Text(m.tagline.uppercased()).font(.system(size: 11, weight: .bold)).tracking(0.6).foregroundStyle(Theme.greenHi)
+            Text(m.tagline.uppercased()).font(.system(size: 11, weight: .bold)).tracking(0.6).foregroundStyle(m.difficulty.color)
             Text(m.title).font(.system(size: 28, weight: .heavy))
             Text(m.brief).font(.system(size: 15)).foregroundStyle(Theme.soft).lineSpacing(3)
+            if m.isTutorial {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(m.steps.enumerated()), id: \.offset) { i, s in step(String(format: "%02d", i + 1), s.title) }
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Theme.panel))
+                Text("A guide at the top of the screen walks you through each step.").font(.system(size: 12)).foregroundStyle(Theme.muted)
+            } else {
             VStack(alignment: .leading, spacing: 8) {
                 step("01", "Tap Add service to place AWS services on the board.")
                 step("02", "Drag a service's green ⊕ handle onto another to connect them.")
@@ -214,8 +251,9 @@ struct BriefSheet: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Theme.panel))
             Text("Pinch to zoom · drag empty space to pan").font(.system(size: 12)).foregroundStyle(Theme.muted)
+            }
             Spacer(minLength: 0)
-            Button("Start building") { dismiss() }.buttonStyle(PrimaryButtonStyle())
+            Button(m.isTutorial ? "Start tutorial" : "Start building") { dismiss() }.buttonStyle(PrimaryButtonStyle())
         }
         .padding(20)
         .foregroundStyle(.white)
@@ -251,6 +289,9 @@ struct VictoryCard: View {
                 stat("Per month", Fmt.money(victory.cost))
                 stat("Per year", Fmt.money(victory.cost * 12))
                 stat("★★★ budget", Fmt.money(store.mission.budget))
+            }
+            if let next = nextMission {
+                Text("Unlocked: \(next.title) · \(next.difficulty.rawValue)").font(.system(size: 13, weight: .bold)).foregroundStyle(next.difficulty.color)
             }
             if victory.stars < 3 {
                 Text("Trim idle capacity or try scheduled scaling to earn more stars.").font(.system(size: 12)).foregroundStyle(Theme.muted).multilineTextAlignment(.center)

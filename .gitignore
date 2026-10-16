@@ -1,0 +1,6 @@
+xcuserdata/
+*.xcuserstate
+.DS_Store
+
+# Contains the OpenAI API key
+ArcheNetflix/Game/Secrets.swift

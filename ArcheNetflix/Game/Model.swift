@@ -62,8 +62,8 @@ enum EventCurve {
         let eventSeconds = m.eventHours * 3600
         let joinsPerSecond = max(0, (fraction(p + 0.002) - fraction(p - 0.002)) / 0.004) * m.peakViewers / eventSeconds
         let surge = p >= 0.5 && p < 0.85
-        let bots = surge ? 0.25 : 0.05
-        let legitAPI = v / 30 + joinsPerSecond * 20
+        let bots = surge ? m.surgeBots : m.surgeBots / 5
+        let legitAPI = m.hasAPI ? v / 30 + joinsPerSecond * m.joinCalls : 0
         var load = Load()
         load[.video] = v * m.bitrateMbps / 1000
         load[.api] = legitAPI * (1 + bots)
