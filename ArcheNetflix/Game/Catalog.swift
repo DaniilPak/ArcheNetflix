@@ -110,7 +110,7 @@ struct ServiceSpec {
                               tiers: [Tier(name: "Hosted zone + health checks", capacity: .infinity, monthly: 25)], maxCount: 1, defaultCount: 1),
         .cloudFront: ServiceSpec(name: "CloudFront", category: .networking, symbol: "bolt.horizontal.fill", role: .cdn, unit: "× 10 Tbps quota",
                                  blurb: "CDN with 600+ edge locations. Caches ~98% of live video segments and 15% of API calls. Default quota is tiny for an event this size — request more bandwidth. Origin Shield collapses misses to 0.3%.",
-                                 tiers: [Tier(name: "10 Tbps bandwidth quota", capacity: 10_000, monthly: 0)], maxCount: 30, defaultCount: 1),
+                                 tiers: [Tier(name: "10 Tbps bandwidth quota", capacity: 10_000, monthly: 0)], maxCount: 60, defaultCount: 1),
         .waf: ServiceSpec(name: "WAF + Shield", category: .security, symbol: "shield.lefthalf.filled", role: .firewall, unit: "web ACL",
                           blurb: "Blocks bots, credential stuffing and DDoS. Big events attract up to 25% junk API traffic that otherwise hits your servers.",
                           tiers: [Tier(name: "Web ACL + Shield Advanced", capacity: 5_000_000, monthly: 3_020)], maxCount: 1, defaultCount: 1),
@@ -313,9 +313,9 @@ struct Mission: Identifiable {
                 brief: "Two million fans pile in for the grand final. CloudFront's quota, a single Aurora writer and a burst of logins at the opening ceremony will all bite. Some bots show up too.",
                 mainEvent: "Grand final", peakViewers: 2_000_000, bitrateMbps: 5, eventHours: 3, budget: 200_000,
                 joinCalls: 12, surgeBots: 0.1),
-        Mission(id: "paul-tyson", difficulty: .hard, title: "Paul vs Tyson", tagline: "Hard · 20M viewers",
-                brief: "Jake Paul vs Mike Tyson streams live worldwide. 20 million people hit play at the walkout — and they all log in at once, with a wave of bots behind them. Last time, the stream buckled. Design an AWS architecture that survives the spike.",
-                mainEvent: "Paul vs Tyson", peakViewers: 20_000_000, bitrateMbps: 5, eventHours: 3, budget: 1_850_000),
+        Mission(id: "paul-tyson", difficulty: .hard, title: "Paul vs Tyson", tagline: "Hard · 60M viewers",
+                brief: "Jake Paul vs Mike Tyson streams live worldwide — the real fight peaked at about 60 million concurrent streams. They all hit play at the walkout — and they all log in at once, with a wave of bots behind them. Last time, the stream buckled. Design an AWS architecture that survives the spike.",
+                mainEvent: "Paul vs Tyson", peakViewers: 60_000_000, bitrateMbps: 5, eventHours: 3, budget: 5_500_000),
     ]
 
     private static func has(_ d: Design, _ from: ServiceKind, _ to: ServiceKind) -> Bool {
