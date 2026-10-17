@@ -59,8 +59,9 @@ enum Solver {
     }
 
     /// Groups of traffic classes that share one capacity pool.
-    static func pools(_ n: Node, effective: Int) -> [(classes: [TrafficClass], cap: Double)] {
-        let unit = n.tierSpec.capacity
+    static func pools(_ n: Node, effective: Int, perf: Double = 1) -> [(classes: [TrafficClass], cap: Double)] {
+        // Faster backend languages serve more per server; managed quotas (Step Functions, AppSync) don't change.
+        let unit = n.tierSpec.capacity * (n.spec.role == .compute && ![.stepFunctions, .appSync].contains(n.kind) ? perf : 1)
         let c = Double(n.count), e = Double(effective)
         switch n.spec.role {
         case .viewers, .encoder, .firewall: return []
@@ -127,7 +128,7 @@ enum Solver {
         for n in design.nodes {
             var s = NodeStat()
             s.effectiveCount = effectiveCount(n, parents: parents[n.id] ?? [])
-            pool[n.id] = pools(n, effective: s.effectiveCount)
+            pool[n.id] = pools(n, effective: s.effectiveCount, perf: mission.computeMultiplier)
             for p in pool[n.id]! { for c in p.classes { s.capacity[c] = p.cap } }
             stats[n.id] = s
         }

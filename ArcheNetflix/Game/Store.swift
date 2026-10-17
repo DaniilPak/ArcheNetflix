@@ -8,6 +8,17 @@ struct LogLine: Identifiable {
     let text: String
 }
 
+enum GameMode: String { case missions, tycoon }
+
+struct IPOResult: Identifiable {
+    let id = UUID()
+    let company: String
+    let valuation: Double
+    let equity: Double
+    let points: Double
+    let days: Int
+}
+
 struct Victory: Identifiable {
     let id = UUID()
     let cost: Double
@@ -51,6 +62,20 @@ final class Store {
     private(set) var hintLoading = false
     private var undoStack: [Design] = []
 
+    // Tycoon mode
+    private(set) var mode: GameMode = .missions
+    private(set) var tycoon: TycoonState?
+    /// Forecast of the next announced spike, at its traffic.
+    private(set) var spikeForecast: Forecast?
+    private(set) var revenuePerHour = 0.0
+    private(set) var costPerHour = 0.0
+    var bankrupt = false
+    var ipoResult: IPOResult?
+    var offlineReport: String?
+    private var refreshedAt = (users: 0.0, hour: -100.0, spiking: false)
+    private var automatedAt = -100.0
+    private var unlockedCount = 0
+
     enum EdgeEnd { case from, to }
 
     /// Best stars earned per mission id.
@@ -67,8 +92,12 @@ final class Store {
         if args.contains("-demo") || args.contains("-demoFail") { design = .demo(failing: args.contains("-demoFail")) }
         #endif
         log(.info, "“\(m.title)” loaded · peak \(Fmt.viewers(m.peakUsers)) \(m.audience)")
-        recompute()
-        restartEvent()
+        if UserDefaults.standard.string(forKey: "mode") == GameMode.tycoon.rawValue, let saved = Store.loadTycoon() {
+            enterTycoon(saved, offline: true)
+        } else {
+            recompute()
+            restartEvent()
+        }
     }
 
     var monthly: Double { costs.reduce(0) { $0 + $1.total } }
@@ -104,6 +133,9 @@ final class Store {
 
     func choose(_ m: Mission) {
         save()
+        mode = .missions
+        UserDefaults.standard.set(GameMode.missions.rawValue, forKey: "mode")
+        bankrupt = false
         mission = m
         UserDefaults.standard.set(m.id, forKey: "mission")
         design = Store.load(m)
@@ -121,6 +153,7 @@ final class Store {
     private static func load(_ m: Mission) -> Design {
         guard let data = UserDefaults.standard.data(forKey: "design.\(m.id)"),
               var d = try? JSONDecoder().decode(Design.self, from: data), d.viewers != nil else { return .starter() }
+        d.upgrade()
         migrate(&d)
         return d
     }
@@ -144,6 +177,13 @@ final class Store {
     }
 
     func save() {
+        if mode == .tycoon, var s = tycoon {
+            s.design = design
+            s.lastSaved = Date()
+            tycoon = s
+            if let data = try? JSONEncoder().encode(s) { UserDefaults.standard.set(data, forKey: "tycoon") }
+            return
+        }
         if let data = try? JSONEncoder().encode(design) { UserDefaults.standard.set(data, forKey: "design.\(mission.id)") }
     }
 
@@ -176,6 +216,7 @@ final class Store {
     // MARK: Editing
 
     private func changed() {
+        if mode == .tycoon { refreshTycoon(); runMin = hasStarted ? live.health : 0; save(); return }
         recompute()
         // Edits restart the live check; the forecast already covers the whole event curve.
         runMin = hasStarted ? live.health : 0
@@ -208,7 +249,11 @@ final class Store {
 
     /// Creates a service wired between `from` and `to` (either may be nil).
     @discardableResult
-    func insert(_ kind: ServiceKind, from: UUID?, to: UUID?, replacing: UUID?) -> UUID {
+    func insert(_ kind: ServiceKind, from: UUID?, to: UUID?, replacing: UUID?) -> UUID? {
+        guard mission.allows(kind) else {
+            show("\(kind.spec.name) unlocks at \(Fmt.viewers(Tycoon.unlockThreshold(kind) ?? 0)) \(mission.audience).")
+            return nil
+        }
         checkpoint()
         let a = design.node(from), b = design.node(to)
         var position: CGPoint
@@ -227,7 +272,8 @@ final class Store {
         }
         while design.nodes.contains(where: { abs($0.x - position.x) < 110 && abs($0.y - position.y) < 110 }) { position.y += 130 }
         let index = (design.nodes.filter { $0.kind == kind }.map(\.index).max() ?? 0) + 1
-        let node = Node(kind: kind, x: position.x, y: position.y, count: kind.spec.defaultCount, tier: kind == .ec2 ? 1 : 0, index: index)
+        let node = Node(kind: kind, x: position.x, y: position.y, count: mode == .tycoon ? 1 : kind.spec.defaultCount,
+                        tier: mode == .tycoon ? 0 : kind.spec.defaultTier, index: index)
         design.nodes.append(node)
         if let replacing { design.edges.removeAll { $0.id == replacing } }
         if let a, a.kind.linkProblem(to: kind) == nil { design.edges.append(Edge(from: a.id, to: node.id)) }
@@ -344,6 +390,8 @@ final class Store {
 
     func requestHint(index: Int = 0) {
         guard !hintLoading else { return }
+        // The hint card shares space with the inspectors; make room for it.
+        withAnimation(.easeOut(duration: 0.15)) { selection = nil; selectedEdge = nil }
         hintLoading = true
         if index == 0 { hint = nil }
         let suggestions = Advisor.suggestions(design: design, mission: mission, forecast: forecast, costs: costs, tutorialStep: tutorialStep)
@@ -524,6 +572,227 @@ final class Store {
         moveCamera(offset: CGSize(width: offset.width + dx, height: offset.height + dy))
     }
 
+    // MARK: Tycoon
+
+    private static func loadTycoon() -> TycoonState? {
+        guard let data = UserDefaults.standard.data(forKey: "tycoon"), var s = try? JSONDecoder().decode(TycoonState.self, from: data) else { return nil }
+        s.design.upgrade()
+        return s
+    }
+
+    var hasTycoon: Bool { tycoon != nil || UserDefaults.standard.data(forKey: "tycoon") != nil }
+
+    /// Starts a new company. Founder points and IPO count carry over.
+    func startTycoon(_ business: Business, frontend: Frontend, stack: Stack, name: String) {
+        let previous = tycoon ?? Store.loadTycoon()
+        var s = TycoonState(business: business, frontend: frontend, stack: stack,
+                            company: name.trimmingCharacters(in: .whitespaces).isEmpty ? business.defaultName : name,
+                            cash: Tycoon.startingCash - frontend.buildCost, users: Tycoon.startingUsers, hour: 9,
+                            design: .starter(), nextSpike: 24 * 6)
+        s.founderPoints = previous?.founderPoints ?? 0
+        s.ipos = previous?.ipos ?? 0
+        if mode == .missions { save() }
+        enterTycoon(s, offline: false)
+        log(.info, "Founded \(s.company) · \(business.title) · \(frontend.title) · \(stack.title)")
+    }
+
+    func continueTycoon() {
+        guard let s = tycoon ?? Store.loadTycoon() else { return }
+        if mode == .missions { save() }
+        enterTycoon(s, offline: false)
+    }
+
+    private func enterTycoon(_ state: TycoonState, offline: Bool) {
+        var s = state
+        if offline {
+            // Idle earnings: up to two game days at half speed, only when the company was making money.
+            let hours = min(Date().timeIntervalSince(s.lastSaved), 48)
+            if hours > 1, s.netPerHour > 0 {
+                s.cash += s.netPerHour * hours * 0.5
+                s.users = max(10, s.users + max(0, s.growthPerHour) * hours * 0.5)
+                s.hour += hours
+                offlineReport = "While you were away: +\(Fmt.money(s.netPerHour * hours * 0.5)) and +\(Fmt.viewers(max(0, s.growthPerHour) * hours * 0.5)) \(s.business.noun)."
+            }
+        }
+        mode = .tycoon
+        UserDefaults.standard.set(GameMode.tycoon.rawValue, forKey: "mode")
+        tycoon = s
+        design = s.design
+        selection = nil
+        selectedEdge = nil
+        hint = nil
+        victory = nil
+        bankrupt = false
+        undoStack = []
+        logs = []
+        unlockedCount = Tycoon.available(s).count
+        refreshedAt = (0, -100, false)
+        refreshTycoon()
+        restartEvent()
+        progress = s.timeOfDay
+        save()
+        recenter()
+    }
+
+    /// Rebuilds the simulator's view of the company (size, spike, unlocks) and the bill.
+    private func refreshTycoon() {
+        guard let s = tycoon else { return }
+        let revenue = Tycoon.revenuePerHour(s, health: 1)
+        mission = Tycoon.mission(s, monthlyRevenue: revenue * 720)
+        forecast = Forecast.run(design, mission)
+        costs = Pricing.lines(design, mission, peak: forecast.peak)
+        costPerHour = Tycoon.monthlyCost(costs, s) / 720
+        if let spike = s.spike, s.hour < spike.start {
+            spikeForecast = Forecast.run(design, Tycoon.mission(s, multiplier: spike.multiplier, monthlyRevenue: revenue * 720))
+        } else {
+            spikeForecast = nil
+        }
+        refreshedAt = (s.users, s.hour, Tycoon.spikeMultiplier(s) > 1)
+        tickSolve()
+    }
+
+    private func tycoonTick() {
+        guard var s = tycoon, !bankrupt else { return }
+        let dt = 0.1 * speed
+        s.hour += dt
+
+        // Traffic spikes: announced a day ahead, then judged on how the service held up.
+        if s.spike == nil, s.users >= 500, s.hour >= s.nextSpike - Tycoon.warning {
+            let spike = Tycoon.randomSpike(s)
+            s.spike = spike
+            log(.alarm, "Heads up: \(spike.name) in \(Int(spike.start - s.hour)) h — \(Int(spike.multiplier))× traffic for \(Int(spike.end - spike.start)) h")
+            show("⚡ \(spike.name) in \(Int(spike.start - s.hour)) hours — get ready")
+        }
+        if var spike = s.spike {
+            if s.hour >= spike.start && s.hour < spike.end {
+                spike.minHealth = min(spike.minHealth, hasStarted ? live.health : 0)
+                s.spike = spike
+            } else if s.hour >= spike.end {
+                if spike.minHealth >= 0.98 {
+                    let gained = s.users * 0.1
+                    s.users += gained
+                    log(.ok, "Survived \(spike.name): +\(Fmt.viewers(gained)) new \(s.business.noun)")
+                    show("Survived \(spike.name)! +\(Fmt.viewers(gained)) \(s.business.noun)")
+                } else {
+                    let lost = s.users * 0.08
+                    s.users -= lost
+                    log(.alarm, "\(spike.name) took you down (\(Fmt.percent(spike.minHealth)) served): −\(Fmt.viewers(lost)) \(s.business.noun)")
+                    show("\(spike.name) took you down — lost \(Fmt.viewers(lost)) \(s.business.noun)")
+                }
+                s.spike = nil
+                s.nextSpike = s.hour + Double.random(in: 96...200)
+            }
+        }
+
+        // Money and users.
+        let health = hasStarted ? live.health : 0
+        revenuePerHour = Tycoon.revenuePerHour(s, health: health)
+        let growth = Tycoon.growthPerHour(s, health: health)
+        s.cash += (revenuePerHour - costPerHour) * dt
+        s.totalRevenue += revenuePerHour * dt
+        s.users = max(10, s.users + growth * dt)
+        s.netPerHour = revenuePerHour - costPerHour
+        s.growthPerHour = growth
+        let crossedDay = Int(s.hour / 24) != Int((s.hour - dt) / 24)
+        tycoon = s
+
+        let unlocked = Tycoon.available(s)
+        if unlocked.count > unlockedCount {
+            unlockedCount = unlocked.count
+            let names = Tycoon.unlocks.last { s.users >= $0.users }?.kinds.map(\.spec.name).joined(separator: ", ") ?? ""
+            log(.ok, "\(Fmt.viewers(s.users)) \(s.business.noun)! Unlocked: \(names)")
+            show("New AWS services unlocked: \(names)")
+        }
+
+        progress = s.timeOfDay
+        let spiking = Tycoon.spikeMultiplier(s) > 1
+        if abs(s.users - refreshedAt.users) / max(refreshedAt.users, 1) > 0.05 || s.hour - refreshedAt.hour >= 6 || spiking != refreshedAt.spiking {
+            refreshTycoon()
+            automate()
+        } else {
+            tickSolve()
+        }
+        if s.cash < -2_000 {
+            bankrupt = true
+            log(.alarm, "Out of money. \(s.company) shuts down.")
+        }
+        if crossedDay { save() }
+    }
+
+    /// Owned automation upgrades resize services to ~65% of peak load, using the upcoming spike's forecast when one is close.
+    private func automate() {
+        guard let s = tycoon, s.hour - automatedAt >= 3 else { return }
+        automatedAt = s.hour
+        let owned = [Upgrade.autoCompute, .autoData, .autoQuotas].filter { s.level($0) > 0 }
+        guard !owned.isEmpty else { return }
+        let ahead = s.spike.map { $0.start - s.hour < 6 } ?? false
+        let utils = (ahead ? spikeForecast?.peakUtil : nil) ?? forecast.peakUtil
+        var notes: [String] = []
+        for i in design.nodes.indices {
+            let n = design.nodes[i]
+            guard owned.contains(where: { Tycoon.managed($0)(n) }), let util = utils[n.id], util > 0 else { continue }
+            guard util > 0.8 || (util < 0.3 && n.count > 1) else { continue }
+            let target = min(n.spec.maxCount, max(1, Int((Double(n.count) * util / 0.65).rounded(.up))))
+            if target != n.count {
+                notes.append("\(n.title) \(n.count)→\(target)")
+                design.nodes[i].count = target
+            }
+        }
+        if !notes.isEmpty {
+            log(.info, "Automation: " + notes.joined(separator: ", "))
+            refreshTycoon()
+        }
+    }
+
+    func canBuy(_ u: Upgrade) -> Bool {
+        guard let s = tycoon else { return false }
+        let level = s.level(u)
+        return level < u.maxLevel && s.users >= u.unlockUsers && s.cash >= u.cost(level: level)
+    }
+
+    func buy(_ u: Upgrade) {
+        guard canBuy(u), var s = tycoon else { return }
+        s.cash -= u.cost(level: s.level(u))
+        s.upgrades[u.rawValue] = s.level(u) + 1
+        tycoon = s
+        log(.ok, "Bought \(u.title) (level \(s.level(u)))")
+        refreshTycoon()
+        automatedAt = -100
+        automate()
+        save()
+    }
+
+    func raise(_ f: Funding) {
+        guard var s = tycoon, !s.funding.contains(f.rawValue), s.users >= f.minUsers else { return }
+        s.cash += f.cash
+        s.equity *= 1 - f.dilution
+        s.funding.append(f.rawValue)
+        tycoon = s
+        log(.ok, "Raised \(f.title): +\(Fmt.money(f.cash)) for \(Int(f.dilution * 100))% of the company")
+        show("\(f.title) closed: +\(Fmt.money(f.cash))")
+        save()
+    }
+
+    var valuation: Double { tycoon.map { Tycoon.valuation(revenuePerDay: Tycoon.revenuePerHour($0, health: 1) * 24) } ?? 0 }
+
+    func goPublic() {
+        guard let s = tycoon, valuation >= Tycoon.ipoValuation else { return }
+        let points = valuation / 1e9 * s.equity
+        var next = s
+        next.founderPoints += points
+        next.ipos += 1
+        tycoon = next
+        save()
+        ipoResult = IPOResult(company: s.company, valuation: valuation, equity: s.equity, points: points, days: s.day)
+        playing = false
+    }
+
+    func leaveTycoon() {
+        save()
+        let id = UserDefaults.standard.string(forKey: "mission")
+        choose(Mission.all.first { $0.id == id } ?? Mission.all[0])
+    }
+
     // MARK: Simulation clock
 
     func restartEvent() {
@@ -538,6 +807,7 @@ final class Store {
         while !Task.isCancelled {
             try? await Task.sleep(for: .milliseconds(100))
             guard playing, victory == nil else { continue }
+            if mode == .tycoon { tycoonTick(); continue }
             progress += 0.1 / mission.realSeconds * speed
             jitter = min(Forecast.jitter, max(2 - Forecast.jitter, jitter + Double.random(in: -0.006...0.006)))
             if progress >= 1 { finishEvent() } else { tickSolve() }
@@ -588,6 +858,10 @@ final class Store {
     }
 
     var clock: String {
+        if let s = tycoon, mode == .tycoon {
+            let minutes = Int(s.timeOfDay * 24 * 60)
+            return String(format: "Day %d · %02d:%02d", s.day, minutes / 60, minutes % 60)
+        }
         let t = Int(progress * mission.eventHours * 3600)
         return String(format: "T+%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60)
     }

@@ -118,6 +118,8 @@ struct ServiceSpec {
     var baseMonthly = 0.0
     /// S3 only: uploads (PUTs) per second per unit, alongside its video capacity.
     var uploadCapacity = 0.0
+    /// Tier a newly placed service starts at.
+    var defaultTier = 0
 
     var color: Color { category.color }
 
@@ -143,11 +145,12 @@ struct ServiceSpec {
                                  tiers: [Tier(name: "10k req/s throttle quota", capacity: 10_000, monthly: 0)], maxCount: 200, defaultCount: 1),
         .ec2: ServiceSpec(name: "EC2 · Node.js", category: .compute, symbol: "server.rack", role: .compute, unit: "instances",
                           blurb: "Node.js servers on Graviton. Serve the API, or poll a queue as workers. Behind a load balancer every instance takes API traffic; without one only one does.",
-                          tiers: [Tier(name: "c7g.large · 2 vCPU", capacity: 2_000, monthly: 52.9),
+                          tiers: [Tier(name: "t4g.small · burstable", capacity: 400, monthly: 12.3),
+                                  Tier(name: "c7g.large · 2 vCPU", capacity: 2_000, monthly: 52.9),
                                   Tier(name: "c7g.xlarge · 4 vCPU", capacity: 4_000, monthly: 105.9),
                                   Tier(name: "c7g.2xlarge · 8 vCPU", capacity: 8_000, monthly: 211.7),
                                   Tier(name: "c7g.4xlarge · 16 vCPU", capacity: 16_000, monthly: 423.4)],
-                          maxCount: 5_000, defaultCount: 2, schedulable: true, needsLoadBalancer: true),
+                          maxCount: 5_000, defaultCount: 2, schedulable: true, needsLoadBalancer: true, defaultTier: 2),
         .fargate: ServiceSpec(name: "ECS Fargate", category: .compute, symbol: "shippingbox.fill", role: .compute, unit: "tasks",
                               blurb: "Serverless containers running the same Node.js API. No servers to patch. Needs a load balancer to spread traffic.",
                               tiers: [Tier(name: "0.5 vCPU · 1 GB", capacity: 1_000, monthly: 14.4),
@@ -159,10 +162,11 @@ struct ServiceSpec {
                              tiers: [Tier(name: "1,000 concurrency quota", capacity: 20_000, monthly: 0)], maxCount: 100, defaultCount: 1),
         .elastiCache: ServiceSpec(name: "ElastiCache Valkey", category: .database, symbol: "memorychip.fill", role: .cache, unit: "shards",
                                   blurb: "In-memory cache (Valkey, the open-source Redis successor). Serves 90% of reads — sessions, entitlements, profiles — before they reach the database.",
-                                  tiers: [Tier(name: "cache.r7g.large", capacity: 100_000, monthly: 128),
+                                  tiers: [Tier(name: "cache.t4g.micro", capacity: 5_000, monthly: 11.7),
+                                          Tier(name: "cache.r7g.large", capacity: 100_000, monthly: 128),
                                           Tier(name: "cache.r7g.xlarge", capacity: 200_000, monthly: 256),
                                           Tier(name: "cache.r7g.2xlarge", capacity: 400_000, monthly: 512)],
-                                  maxCount: 500, defaultCount: 1, schedulable: true),
+                                  maxCount: 500, defaultCount: 1, schedulable: true, defaultTier: 1),
         .dynamoDB: ServiceSpec(name: "DynamoDB", category: .database, symbol: "tablecells.fill", role: .database, unit: "× 40k ops/s quota",
                                blurb: "Serverless key-value database. On-demand, pay per request. Table quota is 40k ops/s — raise it for spikes.",
                                tiers: [Tier(name: "On-demand · 40k ops/s quota", capacity: 40_000, monthly: 0)], maxCount: 100, defaultCount: 1),
@@ -214,11 +218,12 @@ struct ServiceSpec {
                                  tiers: [Tier(name: "Serverless · 25k ops/s quota", capacity: 25_000, monthly: 0)], maxCount: 100, defaultCount: 1),
         .rds: ServiceSpec(name: "RDS Postgres", category: .database, symbol: "externaldrive.fill", role: .database, unit: "instances",
                           blurb: "Classic managed PostgreSQL. Cheaper than Aurora, but extra instances are read replicas — one writer takes every write.",
-                          tiers: [Tier(name: "db.m7g.large", capacity: 4_000, monthly: 120),
+                          tiers: [Tier(name: "db.t4g.micro", capacity: 300, monthly: 12),
+                                  Tier(name: "db.m7g.large", capacity: 4_000, monthly: 120),
                                   Tier(name: "db.m7g.xlarge", capacity: 8_000, monthly: 240),
                                   Tier(name: "db.m7g.2xlarge", capacity: 16_000, monthly: 480),
                                   Tier(name: "db.m7g.4xlarge", capacity: 32_000, monthly: 960)],
-                          maxCount: 16, defaultCount: 1, singleWriter: true),
+                          maxCount: 16, defaultCount: 1, singleWriter: true, defaultTier: 1),
         .memoryDB: ServiceSpec(name: "MemoryDB", category: .database, symbol: "cpu.fill", role: .database, unit: "shards",
                                blurb: "Durable in-memory database (Valkey API). Primary store for sessions and watch state with cache-like speed. Reads and writes share each shard.",
                                tiers: [Tier(name: "db.r7g.large", capacity: 100_000, monthly: 225),

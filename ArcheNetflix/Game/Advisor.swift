@@ -48,7 +48,9 @@ struct Fixer {
 
     func connectOrAdd(_ n: Node, prefer kinds: [ServiceKind], add: ServiceKind, keep: (Node) -> Bool = { _ in true }) -> Fix {
         if let t = existing(kinds, from: n, keep: keep) { return Fix(title: "Connect \(n.title) → \(t.title)", action: .connect(n.id, t.id)) }
-        return Fix(title: "Add \(add.spec.name) after \(n.title)", action: .add(add, from: n.id))
+        // In tycoon mode, fall back to something already unlocked.
+        let kind = mission.allows(add) ? add : (kinds.first { mission.allows($0) && n.kind.linkProblem(to: $0) == nil } ?? add)
+        return Fix(title: "Add \(kind.spec.name) after \(n.title)", action: .add(kind, from: n.id))
     }
 
     /// Services that already take user API traffic shouldn't double as background workers.
@@ -199,7 +201,10 @@ enum Advisor {
         }
         // Drop duplicates, keep order.
         var seen = Set<String>()
-        return list.filter { seen.insert($0.fix.title).inserted }
+        return list.filter { s in
+            if case let .add(kind, _, _, _) = s.fix.action, !mission.allows(kind) { return false }
+            return seen.insert(s.fix.title).inserted
+        }
     }
 
     private static func tutorialFix(design: Design, step: Int) -> Fix? {

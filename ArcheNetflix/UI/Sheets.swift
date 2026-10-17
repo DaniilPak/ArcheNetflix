@@ -43,18 +43,30 @@ struct PaletteSheet: View {
 
     private func cell(_ kind: ServiceKind) -> some View {
         let spec = kind.spec
-        let tier = spec.tiers[kind == .ec2 ? 1 : 0]
+        let tycoon = store.mode == .tycoon
+        let tier = spec.tiers[tycoon ? 0 : spec.defaultTier]
+        let locked = !store.mission.allows(kind)
         return Button {
             store.add(kind)
-            dismiss()
+            if !locked { dismiss() }
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 ServiceIcon(kind: kind, size: 44)
+                    .overlay(alignment: .bottomTrailing) {
+                        if locked {
+                            Image(systemName: "lock.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(.white)
+                                .padding(4).background(Circle().fill(Theme.bg)).offset(x: 4, y: 4)
+                        }
+                    }
                 VStack(alignment: .leading, spacing: 3) {
                     HStack {
                         Text(spec.name).font(.system(size: 15, weight: .heavy))
                         Spacer()
-                        Text(tier.monthly > 0 ? "\(Fmt.money(tier.monthly))/mo" : "pay per use").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.greenHi)
+                        if locked {
+                            Text("at \(Fmt.viewers(Tycoon.unlockThreshold(kind) ?? 0)) \(store.mission.audience)").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.muted)
+                        } else {
+                            Text(tier.monthly > 0 ? "\(Fmt.money(tier.monthly))/mo" : "pay per use").font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.greenHi)
+                        }
                     }
                     Text(spec.blurb).font(.system(size: 12)).foregroundStyle(Theme.muted).lineLimit(2).multilineTextAlignment(.leading)
                 }
@@ -62,6 +74,7 @@ struct PaletteSheet: View {
             .foregroundStyle(.white)
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Theme.panel))
+            .opacity(locked ? 0.5 : 1)
         }
         .buttonStyle(.plain)
     }
@@ -70,11 +83,13 @@ struct PaletteSheet: View {
 struct MissionsSheet: View {
     let store: Store
     var onBrief: () -> Void
+    var onNewCompany: () -> Void = {}
+    var onShop: () -> Void = {}
     @Environment(\.dismiss) private var dismiss
     @State private var confirmReset = false
 
     private func missionCard(_ m: Mission) -> some View {
-        let current = m.id == store.mission.id
+        let current = store.mode == .missions && m.id == store.mission.id
         let unlocked = store.isUnlocked(m)
         let stars = store.best[m.id] ?? 0
         return Button {
@@ -117,6 +132,43 @@ struct MissionsSheet: View {
         .disabled(!unlocked)
     }
 
+    /// Entry point to Tycoon mode: build a company from 100 users to IPO.
+    private var tycoonCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text("TYCOON").font(.system(size: 10, weight: .heavy)).tracking(0.6).foregroundStyle(Color(hex: 0x2b2a27))
+                    .padding(.horizontal, 7).padding(.vertical, 3).background(Capsule().fill(Theme.yellow))
+                Text(store.tycoon?.company ?? "Build a company").font(.system(size: 18, weight: .heavy))
+                Spacer()
+                if store.mode == .tycoon {
+                    Text("PLAYING").font(.system(size: 10, weight: .heavy)).tracking(0.6).foregroundStyle(Color(hex: 0x2b2a27))
+                        .padding(.horizontal, 7).padding(.vertical, 3).background(Capsule().fill(.white))
+                }
+            }
+            if let s = store.tycoon {
+                Text("\(s.business.title) · Day \(s.day) · \(Fmt.viewers(s.users)) \(s.business.noun) · \(Fmt.money(s.cash))")
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(Theme.yellow)
+            }
+            Text("Pick a business, a frontend and a tech stack. Start with $3k and 200 users, earn from every user you serve, pay AWS for everything you run, unlock services as you grow, survive traffic spikes, and take it public.")
+                .font(.system(size: 13)).foregroundStyle(Theme.soft)
+            HStack(spacing: 8) {
+                if store.mode == .tycoon {
+                    Button { dismiss(); onShop() } label: { Label("Upgrades", systemImage: "cart.fill") }.buttonStyle(SecondaryButtonStyle(height: 40))
+                    Button { store.leaveTycoon(); dismiss() } label: { Label("Missions", systemImage: "flag.checkered") }.buttonStyle(SecondaryButtonStyle(height: 40))
+                } else if store.hasTycoon {
+                    Button { store.continueTycoon(); dismiss() } label: { Label("Continue", systemImage: "play.fill") }.buttonStyle(PrimaryButtonStyle(compact: true))
+                }
+                Button(action: onNewCompany) { Label("New company", systemImage: "plus") }.buttonStyle(SecondaryButtonStyle(height: 40))
+            }
+            .font(.system(size: 13, weight: .bold))
+            .labelStyle(.titleAndIcon)
+        }
+        .foregroundStyle(.white)
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Theme.panel).strokeBorder(store.mode == .tycoon ? Theme.yellow : .clear, lineWidth: 2))
+    }
+
     private func previous(_ m: Mission) -> Mission? {
         let track = Mission.all.filter { $0.track == m.track }
         guard let i = track.firstIndex(where: { $0.id == m.id }), i > 0 else { return Mission.all.first { $0.track == .basics } }
@@ -127,6 +179,7 @@ struct MissionsSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 10) {
+                    tycoonCard
                     ForEach(Track.allCases, id: \.self) { track in
                         Text(track.rawValue.uppercased()).font(.system(size: 11, weight: .bold)).tracking(0.6).foregroundStyle(Theme.muted)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
@@ -170,13 +223,19 @@ struct CostSheet: View {
                             Text("/ month").foregroundStyle(Theme.muted)
                         }
                         Text("\(Fmt.money(store.monthly * 12)) / year").font(.system(size: 17, weight: .bold).monospacedDigit()).foregroundStyle(Theme.soft)
-                        HStack(spacing: 4) {
-                            ForEach(0..<3) { i in Image(systemName: i < store.stars ? "star.fill" : "star") }
-                            Text("★★★ under \(Fmt.money(store.mission.budget))/mo").font(.system(size: 12)).foregroundStyle(Theme.muted).padding(.leading, 4)
+                        if store.mode == .tycoon {
+                            Text("Revenue \(Fmt.money(store.revenuePerHour * 720))/mo at today's traffic · after Savings Plans the bill is \(Fmt.money(store.costPerHour * 720))/mo")
+                                .font(.system(size: 12)).foregroundStyle(Theme.muted)
+                        } else {
+                            HStack(spacing: 4) {
+                                ForEach(0..<3) { i in Image(systemName: i < store.stars ? "star.fill" : "star") }
+                                Text("★★★ under \(Fmt.money(store.mission.budget))/mo").font(.system(size: 12)).foregroundStyle(Theme.muted).padding(.leading, 4)
+                            }
+                            .foregroundStyle(Theme.yellow)
                         }
-                        .foregroundStyle(Theme.yellow)
                     }
                     .listRowBackground(Theme.panel)
+                    if store.mode == .missions {
                     Toggle(isOn: Binding(get: { store.design.scheduledScaling }, set: { store.setScheduled($0) })) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Scheduled scaling").font(.system(size: 15, weight: .bold))
@@ -186,6 +245,7 @@ struct CostSheet: View {
                     }
                     .tint(Theme.green)
                     .listRowBackground(Theme.panel)
+                    }
                 }
                 Section("Breakdown") {
                     if store.costs.isEmpty { Text("Nothing deployed yet.").foregroundStyle(Theme.muted) }

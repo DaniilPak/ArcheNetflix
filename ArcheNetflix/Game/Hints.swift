@@ -28,7 +28,8 @@ enum Hints {
         let options = Array(suggestions.prefix(6))
         guard let pick = try? await ask(options: options, context: context), options.indices.contains(pick.choice) else { return offline }
         // Keep it short even when the model rambles: at most two sentences.
-        let sentences = pick.explanation.matches(of: /[^.!?]+[.!?]+|[^.!?]+$/).map { String($0.output) }
+        // A sentence ends at . ! or ? followed by a space or the end (so "Node.js" and "2.5×" stay whole).
+        let sentences = pick.explanation.matches(of: /.+?[.!?](?=\s|$)|.+$/).map { String($0.output) }
         let text = sentences.prefix(2).joined().trimmingCharacters(in: .whitespaces)
         return Hint(fix: options[pick.choice].fix, explanation: text, fromAI: true, index: pick.choice, total: suggestions.count)
     }

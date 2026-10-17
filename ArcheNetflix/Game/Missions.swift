@@ -76,8 +76,17 @@ struct Mission: Identifiable {
     /// Real seconds one event takes at 1×.
     var realSeconds = 75.0
     var steps: [TutorialStep] = []
+    /// Tycoon: the demand follows a 24 h day instead of an event.
+    var daily = false
+    /// Tycoon: a traffic spike is running (bots surge with it).
+    var surging = false
+    /// Tycoon: backend language speed — how much traffic each compute unit handles.
+    var computeMultiplier = 1.0
+    /// Tycoon: services unlocked so far (nil = everything).
+    var available: Set<ServiceKind>?
 
     var isTutorial: Bool { !steps.isEmpty }
+    func allows(_ kind: ServiceKind) -> Bool { available?.contains(kind) ?? true }
     var mainEvent: String { phases[3] }
     var hasAPI: Bool { profile.apiPerUser > 0 || profile.joinCalls > 0 }
 

@@ -319,6 +319,7 @@ struct BottomBar: View {
     let store: Store
     @Binding var showLog: Bool
     var onAdd: () -> Void
+    var onShop: () -> Void = {}
 
     var body: some View {
         HStack(spacing: 8) {
@@ -337,11 +338,21 @@ struct BottomBar: View {
                 .disabled(!store.canUndo)
                 .opacity(store.canUndo ? 1 : 0.5)
                 .accessibilityLabel("Undo")
-            Button { store.playing.toggle() } label: { Image(systemName: store.playing ? "pause.fill" : "play.fill") }
-                .buttonStyle(SecondaryButtonStyle(height: 46, expand: false))
-                .frame(width: 52)
-                .accessibilityLabel(store.playing ? "Pause traffic" : "Play traffic")
+            if store.mode == .tycoon {
+                Button(action: onShop) { Image(systemName: "cart.fill").foregroundStyle(Theme.greenHi) }
+                    .buttonStyle(SecondaryButtonStyle(height: 46, expand: false))
+                    .frame(width: 52)
+                    .accessibilityLabel("Upgrades")
+            } else {
+                Button { store.playing.toggle() } label: { Image(systemName: store.playing ? "pause.fill" : "play.fill") }
+                    .buttonStyle(SecondaryButtonStyle(height: 46, expand: false))
+                    .frame(width: 52)
+                    .accessibilityLabel(store.playing ? "Pause traffic" : "Play traffic")
+            }
             Menu {
+                if store.mode == .tycoon {
+                    Button { store.playing.toggle() } label: { Label(store.playing ? "Pause" : "Resume", systemImage: store.playing ? "pause.fill" : "play.fill") }
+                }
                 Picker("Speed", selection: Binding(get: { store.speed }, set: { store.speed = $0 })) {
                     Text("1× speed").tag(1.0)
                     Text("2× speed").tag(2.0)
@@ -350,7 +361,9 @@ struct BottomBar: View {
                 Button { withAnimation(.easeOut(duration: 0.2)) { showLog.toggle() } } label: {
                     Label(showLog ? "Hide CloudWatch log" : "Show CloudWatch log", systemImage: "terminal.fill")
                 }
-                Button { store.restartEvent() } label: { Label("Replay event", systemImage: "arrow.counterclockwise") }
+                if store.mode == .missions {
+                    Button { store.restartEvent() } label: { Label("Replay event", systemImage: "arrow.counterclockwise") }
+                }
                 Button { store.recenter() } label: { Label("Fit board to screen", systemImage: "arrow.up.left.and.arrow.down.right") }
             } label: {
                 Text(store.speed > 1 ? "\(Int(store.speed))×" : "•••").font(.system(size: 15, weight: .heavy).monospacedDigit())

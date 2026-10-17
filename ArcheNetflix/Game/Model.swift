@@ -26,9 +26,19 @@ struct Design: Codable {
     var nodes: [Node]
     var edges: [Edge] = []
     var scheduledScaling = false
+    /// Save format. 2 added starter-size tiers in front of EC2, RDS and ElastiCache.
+    var version: Int? = 2
 
     static func starter() -> Design {
         Design(nodes: [Node(kind: .viewers, x: -220, y: 0, count: 1, tier: 0)])
+    }
+
+    /// Brings boards saved by older versions up to date.
+    mutating func upgrade() {
+        if (version ?? 1) < 2 {
+            for i in nodes.indices where [.ec2, .rds, .elastiCache].contains(nodes[i].kind) { nodes[i].tier += 1 }
+            version = 2
+        }
     }
 
     var viewers: Node? { nodes.first { $0.kind == .viewers } }
@@ -38,9 +48,16 @@ struct Design: Codable {
 /// The audience curve of one event: a slow build, a sharp surge, a plateau and a tail-off.
 enum EventCurve {
     static let phaseEnds = [0.15, 0.55, 0.62, 0.85, 1.0]
+    /// A day (tycoon mode): quiet nights, a lunchtime bump, an evening peak.
+    static let dayEnds = [0.25, 0.5, 0.75, 0.92, 1.0]
 
     static func phase(_ p: Double, _ m: Mission) -> String {
-        m.phases[phaseEnds.firstIndex { p < $0 } ?? 4]
+        m.phases[(m.daily ? dayEnds : phaseEnds).firstIndex { p < $0 } ?? 4]
+    }
+
+    /// Share of the day's peak online at time of day p (0 = midnight); peaks at 20:00.
+    static func daily(_ p: Double) -> Double {
+        0.3 + 0.7 * (0.5 + 0.5 * cos(2 * .pi * (p - 20.0 / 24)))
     }
 
     private static func smooth(_ x: Double) -> Double { let t = min(max(x, 0), 1); return t * t * (3 - 2 * t) }
@@ -58,9 +75,11 @@ enum EventCurve {
 
     static func demand(_ m: Mission, _ p: Double, jitter: Double = 1) -> Demand {
         let f = m.profile
-        let v = m.peakUsers * fraction(p) * jitter
-        let joinsPerSecond = max(0, (fraction(p + 0.002) - fraction(p - 0.002)) / 0.004) * m.peakUsers / (m.eventHours * 3600)
-        let surge = p >= 0.5 && p < 0.85
+        func curve(_ x: Double) -> Double { m.daily ? EventCurve.daily(x) : EventCurve.fraction(x) }
+        let v = m.peakUsers * curve(p) * jitter
+        let span = m.daily ? 24 * 3600.0 : m.eventHours * 3600
+        let joinsPerSecond = max(0, (curve(p + 0.002) - curve(p - 0.002)) / 0.004) * m.peakUsers / span
+        let surge = m.daily ? m.surging : p >= 0.5 && p < 0.85
         let bots = surge ? f.surgeBots : f.surgeBots / 5
         var load = Load()
         load[.video] = v * f.videoMbps / 1000
