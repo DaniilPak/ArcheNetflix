@@ -83,8 +83,18 @@ enum Fmt {
     static func rate(_ v: Double, _ c: TrafficClass) -> String {
         if !v.isFinite { return "∞" }
         switch c {
-        case .video: return v >= 1000 ? String(format: "%.1f Tbps", v / 1000) : String(format: "%.0f Gbps", v)
-        default: return (v >= 1e6 ? String(format: "%.2fM", v / 1e6) : v >= 1e3 ? String(format: "%.0fk", v / 1e3) : String(format: "%.0f", v)) + (c == .api ? " req/s" : " ops/s")
+        case .video: return v >= 1000 ? String(format: "%.1f Tbps", v / 1000) : v >= 10 ? String(format: "%.0f Gbps", v) : String(format: "%.1f Gbps", v)
+        default:
+            let unit: String
+            switch c {
+            case .api: unit = " req/s"
+            case .auth: unit = " sign-ins/s"
+            case .uploads: unit = " uploads/s"
+            case .events: unit = " events/s"
+            case .notifications: unit = " msgs/s"
+            default: unit = " ops/s"
+            }
+            return (v >= 1e6 ? String(format: "%.2fM", v / 1e6) : v >= 1e3 ? String(format: "%.0fk", v / 1e3) : String(format: "%.0f", v)) + unit
         }
     }
     static func percent(_ v: Double) -> String {

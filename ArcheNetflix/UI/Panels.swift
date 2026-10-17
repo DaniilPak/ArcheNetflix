@@ -10,10 +10,11 @@ struct HUD: View {
     var body: some View {
         VStack(spacing: 8) {
             header
-            StatusCard(store: store, compact: store.selection != nil)
+            let busy = store.selection != nil || store.selectedEdge != nil
+            StatusCard(store: store, compact: busy)
             if store.mission.isTutorial {
-                TutorialCard(store: store, compact: store.selection != nil)
-            } else if store.selection == nil, let issue = store.forecast.worst.issues.first(where: { $0.severity == .failure }) ?? (store.hasStarted ? nil : store.live.issues.first) {
+                TutorialCard(store: store, compact: busy)
+            } else if !busy, store.hint == nil, let issue = store.forecast.worst.issues.first(where: { $0.severity == .failure }) ?? (store.hasStarted ? nil : store.live.issues.first) {
                 Button { store.focus(issue.node) } label: {
                     Banner(text: issue.text, color: Theme.orange, icon: "exclamationmark.triangle.fill")
                 }
@@ -70,7 +71,7 @@ struct StatusCard: View {
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(Fmt.viewers(live.demand.viewers)).font(.system(size: 26, weight: .heavy).monospacedDigit())
                             .contentTransition(.numericText())
-                        Text("of \(Fmt.viewers(store.mission.peakViewers))").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.muted)
+                        Text("of \(Fmt.viewers(store.mission.peakUsers)) \(store.mission.audience)").font(.system(size: 13, weight: .semibold)).foregroundStyle(Theme.muted)
                     }
                     Text("\(live.demand.phase) · \(store.clock)").font(.system(size: 12, weight: .semibold).monospacedDigit()).foregroundStyle(Theme.soft)
                 }
@@ -84,8 +85,9 @@ struct StatusCard: View {
                     .padding(.horizontal, 10).padding(.vertical, 6)
                     .background(RoundedRectangle(cornerRadius: 4).fill(status == .holding ? .white : color.opacity(0.9)))
                     HStack(spacing: 8) {
-                        metric("play.rectangle.fill", live.video)
+                        if store.mission.profile.videoMbps > 0 { metric("play.rectangle.fill", live.video) }
                         if store.mission.hasAPI { metric("bolt.fill", live.api) }
+                        if store.mission.profile.uploadsPerUser > 0 { metric("arrow.up.circle.fill", live.uploads) }
                     }
                 }
             }
@@ -215,7 +217,7 @@ struct TutorialCard: View {
     }
 }
 
-/// "What next?" advice from the Hint button.
+/// "What next?" advice from the Hint button, with a button that does the step for you.
 struct HintCard: View {
     let store: Store
     let hint: Hint
@@ -224,23 +226,90 @@ struct HintCard: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: "lightbulb.fill").foregroundStyle(Theme.yellow)
-                Text("NEXT STEP").font(.system(size: 11, weight: .heavy)).tracking(0.6).foregroundStyle(Theme.yellow)
-                Text(hint.fromAI ? "AI architect" : "Simulator").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.muted)
-                    .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Theme.raised))
+                Text(hint.total > 1 ? "NEXT STEP · \(hint.index + 1) OF \(hint.total)" : "NEXT STEP").font(.system(size: 11, weight: .heavy)).tracking(0.6).foregroundStyle(Theme.yellow)
+                if hint.fromAI {
+                    Text("AI pick").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.muted)
+                        .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(Theme.raised))
+                }
                 Spacer()
                 Button { withAnimation(.easeOut(duration: 0.2)) { store.hint = nil } } label: {
                     Image(systemName: "xmark").font(.system(size: 12, weight: .heavy)).foregroundStyle(Theme.muted).frame(width: 28, height: 28)
                 }
                 .accessibilityLabel("Dismiss hint")
             }
-            Text(hint.text).font(.system(size: 14)).foregroundStyle(Theme.soft).fixedSize(horizontal: false, vertical: true)
-            if let node = hint.node, store.design.node(node) != nil {
-                Button { store.focus(node) } label: { Label("Show me", systemImage: "scope").font(.system(size: 13, weight: .bold)) }
-                    .foregroundStyle(Theme.greenHi)
+            if let fix = hint.fix {
+                Text(fix.title).font(.system(size: 16, weight: .heavy)).fixedSize(horizontal: false, vertical: true)
             }
+            Text(hint.explanation).font(.system(size: 13)).foregroundStyle(Theme.soft).fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                if hint.fix != nil {
+                    Button { store.applyHint() } label: { Label("Do it", systemImage: "wand.and.stars") }
+                        .buttonStyle(PrimaryButtonStyle(compact: true))
+                }
+                if let node = hint.node, store.design.node(node) != nil {
+                    Button { store.focus(node) } label: { Label("Show me", systemImage: "scope") }
+                        .buttonStyle(SecondaryButtonStyle(height: 36, expand: false))
+                }
+                if hint.total > 1 {
+                    Button { store.requestHint(index: (hint.index + 1) % hint.total) } label: { Label("Next idea", systemImage: "arrow.right") }
+                        .buttonStyle(SecondaryButtonStyle(height: 36, expand: false))
+                }
+            }
+            .font(.system(size: 13, weight: .bold))
+            .labelStyle(.titleAndIcon)
         }
         .padding(12)
         .background(HStack(spacing: 0) { Theme.yellow.frame(width: 4); Theme.panel }.clipShape(RoundedRectangle(cornerRadius: 8)))
+    }
+}
+
+/// Selected connection: what it carries, plus reverse / insert / delete.
+struct EdgeInspector: View {
+    let store: Store
+    let edge: Edge
+    var onInsert: () -> Void
+
+    var body: some View {
+        let a = store.design.node(edge.from), b = store.design.node(edge.to)
+        let flow = store.live.flow[edge.id] ?? 0
+        let demand = store.forecast.peak.demand.load
+        let carried = TrafficClass.allCases.filter { c in
+            (a?.kind.emits.contains(c) ?? false) && (b?.kind.accepts(c) ?? false) && (!TrafficClass.userFacing.contains(c) || demand[c] > 0)
+        }
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                if let a { ServiceIcon(kind: a.kind, size: 30) }
+                Image(systemName: "arrow.right").font(.system(size: 13, weight: .heavy)).foregroundStyle(Theme.muted)
+                if let b { ServiceIcon(kind: b.kind, size: 30) }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("\(a?.title ?? "") → \(b?.title ?? "")").font(.system(size: 14, weight: .heavy)).lineLimit(1).minimumScaleFactor(0.8)
+                    Text(a?.kind == .waf ? "Protection — WAF filters bots here" : carried.isEmpty ? "Carries nothing" : "Carries " + carried.map(\.noun).joined(separator: ", "))
+                        .font(.system(size: 11)).foregroundStyle(Theme.muted).lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Button { withAnimation(.easeOut(duration: 0.15)) { store.selectedEdge = nil } } label: {
+                    Image(systemName: "xmark").font(.system(size: 13, weight: .heavy)).foregroundStyle(Theme.muted).frame(width: 32, height: 32)
+                }
+                .accessibilityLabel("Close")
+            }
+            if flow > 0 {
+                Text("\(Fmt.percent(min(flow, 1))) of incoming traffic flows here right now").font(.system(size: 12)).foregroundStyle(Theme.soft)
+            }
+            HStack(spacing: 8) {
+                Button { store.reverse(edge.id) } label: { Label("Reverse", systemImage: "arrow.left.arrow.right") }
+                    .buttonStyle(SecondaryButtonStyle(height: 40))
+                Button(action: onInsert) { Label("Insert", systemImage: "plus.circle.fill") }
+                    .buttonStyle(SecondaryButtonStyle(height: 40))
+                Button { store.unlink(edge.id) } label: { Label("Delete", systemImage: "trash") }
+                    .buttonStyle(SecondaryButtonStyle(tint: Theme.red.opacity(0.75), height: 40))
+            }
+            .font(.system(size: 14, weight: .bold))
+            .labelStyle(.titleAndIcon)
+            Text("Drag the white dots at either end onto another service to rewire.").font(.system(size: 11)).foregroundStyle(Theme.muted)
+        }
+        .padding(12)
+        .background(Theme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
     }
 }
 
@@ -262,20 +331,36 @@ struct BottomBar: View {
             .frame(width: 52)
             .disabled(store.hintLoading)
             .accessibilityLabel("Hint: what should I do next?")
+            Button { store.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+                .buttonStyle(SecondaryButtonStyle(height: 46, expand: false))
+                .frame(width: 52)
+                .disabled(!store.canUndo)
+                .opacity(store.canUndo ? 1 : 0.5)
+                .accessibilityLabel("Undo")
             Button { store.playing.toggle() } label: { Image(systemName: store.playing ? "pause.fill" : "play.fill") }
                 .buttonStyle(SecondaryButtonStyle(height: 46, expand: false))
                 .frame(width: 52)
                 .accessibilityLabel(store.playing ? "Pause traffic" : "Play traffic")
-            Button { store.speed = store.speed >= 4 ? 1 : store.speed * 2 } label: {
-                Text("\(Int(store.speed))×").font(.system(size: 15, weight: .heavy).monospacedDigit())
+            Menu {
+                Picker("Speed", selection: Binding(get: { store.speed }, set: { store.speed = $0 })) {
+                    Text("1× speed").tag(1.0)
+                    Text("2× speed").tag(2.0)
+                    Text("4× speed").tag(4.0)
+                }
+                Button { withAnimation(.easeOut(duration: 0.2)) { showLog.toggle() } } label: {
+                    Label(showLog ? "Hide CloudWatch log" : "Show CloudWatch log", systemImage: "terminal.fill")
+                }
+                Button { store.restartEvent() } label: { Label("Replay event", systemImage: "arrow.counterclockwise") }
+                Button { store.recenter() } label: { Label("Fit board to screen", systemImage: "arrow.up.left.and.arrow.down.right") }
+            } label: {
+                Text(store.speed > 1 ? "\(Int(store.speed))×" : "•••").font(.system(size: 15, weight: .heavy).monospacedDigit())
+                    .foregroundStyle(Theme.soft)
+                    .frame(width: 52, height: 46)
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Theme.raised))
+                    .background(RoundedRectangle(cornerRadius: 7).fill(Theme.raised.mix(with: .black, by: 0.45)).offset(y: 3))
+                    .padding(.bottom, 3)
             }
-            .buttonStyle(SecondaryButtonStyle(height: 46, expand: false))
-            .frame(width: 52)
-            .accessibilityLabel("Speed")
-            Button { withAnimation(.easeOut(duration: 0.2)) { showLog.toggle() } } label: { Image(systemName: "terminal.fill") }
-                .buttonStyle(SecondaryButtonStyle(tint: showLog ? Theme.greenShadow : Theme.raised, height: 46, expand: false))
-                .frame(width: 52)
-                .accessibilityLabel("CloudWatch log")
+            .accessibilityLabel("More: speed, log, replay")
         }
         .labelStyle(.titleAndIcon)
     }
@@ -369,11 +454,10 @@ struct Inspector: View {
     private var viewers: some View {
         let d = store.live.demand
         return VStack(alignment: .leading, spacing: 8) {
-            row("Watching now", Fmt.viewers(d.viewers))
-            row("Video demand", Fmt.rate(d.load[.video], .video))
-            row("API demand", Fmt.rate(d.load[.api], .api))
+            row("Active now", "\(Fmt.viewers(d.viewers)) \(store.mission.audience)")
+            ForEach(TrafficClass.userFacing.filter { d.load[$0] > 0 }, id: \.self) { c in row(c.title, Fmt.rate(d.load[c], c)) }
             row("Bot traffic", Fmt.percent(d.botShare))
-            row("Bitrate", "\(Int(store.mission.bitrateMbps)) Mbps · 1080p")
+            if store.mission.profile.videoMbps > 0 { row("Video per user", String(format: "%g Mbps", store.mission.profile.videoMbps)) }
         }
     }
 
@@ -385,16 +469,12 @@ struct Inspector: View {
         }
     }
 
+    /// Classes worth showing for this service: what it takes in, busiest first.
     private var primary: [TrafficClass] {
-        switch node.spec.role {
-        case .cdn: store.mission.hasAPI ? [.video, .api] : [.video]
-        case .origin: [.video]
-        case .cache: [.reads]
-        case .queue: [.writes]
-        case .database: [.reads, .writes]
-        case .encoder: []
-        default: [.api]
-        }
+        let stat = store.live.stats[node.id] ?? NodeStat()
+        let accepted = node.kind == .waf ? [TrafficClass.api] : TrafficClass.allCases.filter { node.kind.accepts($0) }
+        let active = accepted.filter { stat.incoming[$0] > 0 }
+        return active.isEmpty ? Array(accepted.prefix(1)) : active
     }
 
     @ViewBuilder private var controls: some View {
@@ -504,7 +584,7 @@ struct Inspector: View {
                 if !incoming.isEmpty { chips("FROM", incoming, other: \.from) }
                 if !outgoing.isEmpty { chips("SENDS TO", outgoing, other: \.to) }
             }
-        } else if node.spec.role != .database && node.spec.role != .origin {
+        } else if !node.kind.emits.isEmpty || node.kind == .waf {
             Text("Drag the green ⊕ handle onto another service to connect it.").font(.system(size: 12)).foregroundStyle(Theme.greenHi)
         }
     }

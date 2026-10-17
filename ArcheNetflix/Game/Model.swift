@@ -35,18 +35,17 @@ struct Design: Codable {
     func node(_ id: UUID?) -> Node? { nodes.first { $0.id == id } }
 }
 
-/// The audience curve of one event, from doors open to post-fight.
+/// The audience curve of one event: a slow build, a sharp surge, a plateau and a tail-off.
 enum EventCurve {
-    static let phases: [(end: Double, name: String)] = [(0.15, "Doors open"), (0.55, "Undercard"), (0.62, "Walkout surge"), (0.85, "Main event"), (1.0, "Post-event")]
+    static let phaseEnds = [0.15, 0.55, 0.62, 0.85, 1.0]
 
     static func phase(_ p: Double, _ m: Mission) -> String {
-        let name = phases.first { p < $0.end }?.name ?? "Post-event"
-        return name == "Main event" ? m.mainEvent : name
+        m.phases[phaseEnds.firstIndex { p < $0 } ?? 4]
     }
 
     private static func smooth(_ x: Double) -> Double { let t = min(max(x, 0), 1); return t * t * (3 - 2 * t) }
 
-    /// Share of peak viewers watching at progress p (0…1).
+    /// Share of peak users active at progress p (0…1).
     static func fraction(_ p: Double) -> Double {
         switch p {
         case ..<0.15: 0.05 + 0.30 * smooth(p / 0.15)
@@ -58,15 +57,16 @@ enum EventCurve {
     }
 
     static func demand(_ m: Mission, _ p: Double, jitter: Double = 1) -> Demand {
-        let v = m.peakViewers * fraction(p) * jitter
-        let eventSeconds = m.eventHours * 3600
-        let joinsPerSecond = max(0, (fraction(p + 0.002) - fraction(p - 0.002)) / 0.004) * m.peakViewers / eventSeconds
+        let f = m.profile
+        let v = m.peakUsers * fraction(p) * jitter
+        let joinsPerSecond = max(0, (fraction(p + 0.002) - fraction(p - 0.002)) / 0.004) * m.peakUsers / (m.eventHours * 3600)
         let surge = p >= 0.5 && p < 0.85
-        let bots = surge ? m.surgeBots : m.surgeBots / 5
-        let legitAPI = m.hasAPI ? v / 30 + joinsPerSecond * m.joinCalls : 0
+        let bots = surge ? f.surgeBots : f.surgeBots / 5
         var load = Load()
-        load[.video] = v * m.bitrateMbps / 1000
-        load[.api] = legitAPI * (1 + bots)
+        load[.video] = v * f.videoMbps / 1000
+        load[.api] = (v * f.apiPerUser + joinsPerSecond * f.joinCalls) * (1 + bots)
+        load[.auth] = joinsPerSecond * f.authPerJoin * (1 + bots)
+        load[.uploads] = v * f.uploadsPerUser
         return Demand(viewers: v, load: load, botShare: bots / (1 + bots), phase: phase(p, m))
     }
 }
@@ -74,7 +74,7 @@ enum EventCurve {
 struct Demand {
     var viewers: Double
     var load: Load
-    /// Fraction of incoming API traffic that is bots.
+    /// Fraction of incoming API and sign-in traffic that is bots.
     var botShare: Double
     var phase: String
 }

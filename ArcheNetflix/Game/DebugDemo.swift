@@ -14,8 +14,8 @@ extension Design {
         func link(_ a: UUID, _ b: UUID) { d.edges.append(Edge(from: a, to: b)) }
         let v = d.viewers!.id
         let r53 = add(.route53, 1, -50, 0); link(v, r53)
-        let waf = add(.waf, 1, 120, 0); link(r53, waf)
-        let cf = add(.cloudFront, 33, 290, 0); link(waf, cf)
+        let cf = add(.cloudFront, 33, 290, 0); link(r53, cf)
+        let waf = add(.waf, 1, 120, -150); link(waf, cf)
         let mp = add(.mediaPackage, 4, 460, -150); link(cf, mp)
         let ml = add(.mediaLive, 2, 290, -260); link(ml, mp)
         let lb = add(.alb, 24, 460, 120); link(cf, lb)

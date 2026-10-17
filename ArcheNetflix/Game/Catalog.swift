@@ -1,45 +1,58 @@
 import SwiftUI
 
-/// The four kinds of traffic that flow through an architecture.
+/// Kinds of traffic that flow through an architecture. The first four come from users;
+/// the rest are generated inside the system.
 enum TrafficClass: Int, CaseIterable {
-    case video, api, reads, writes
+    case video, api, auth, uploads, reads, writes, events, notifications
 
     var title: String {
         switch self {
         case .video: "Video"
         case .api: "API"
+        case .auth: "Logins"
+        case .uploads: "Uploads"
         case .reads: "DB reads"
         case .writes: "DB writes"
+        case .events: "Events"
+        case .notifications: "Notifications"
         }
     }
 
     var noun: String {
         switch self {
-        case .video: "video segments"
+        case .video: "video"
         case .api: "API requests"
+        case .auth: "sign-ins"
+        case .uploads: "uploads"
         case .reads: "database reads"
         case .writes: "database writes"
+        case .events: "events"
+        case .notifications: "notifications"
         }
     }
+
+    /// Classes users send directly; the ones the HUD reports on.
+    static let userFacing: [TrafficClass] = [.video, .api, .auth, .uploads]
 }
 
 /// A value per traffic class (load, capacity or success ratio).
 struct Load {
-    var values: [Double] = [0, 0, 0, 0]
+    var values = [Double](repeating: 0, count: TrafficClass.allCases.count)
     subscript(c: TrafficClass) -> Double {
         get { values[c.rawValue] }
         set { values[c.rawValue] = newValue }
     }
-    static let infinite = Load(values: Array(repeating: .infinity, count: 4))
-    static let one = Load(values: [1, 1, 1, 1])
+    static let infinite = Load(values: .init(repeating: .infinity, count: TrafficClass.allCases.count))
+    static let one = Load(values: .init(repeating: 1, count: TrafficClass.allCases.count))
 }
 
 enum Category: String, CaseIterable {
     case networking = "Networking & CDN"
-    case security = "Security"
+    case security = "Security & Identity"
     case compute = "Compute"
-    case database = "Database & Cache"
-    case integration = "App Integration"
+    case database = "Databases & Caches"
+    case integration = "Messaging & Events"
+    case messaging = "Customer Messaging"
     case storage = "Storage"
     case media = "Media Services"
 
@@ -51,27 +64,33 @@ enum Category: String, CaseIterable {
         case .compute: Color(hex: 0xed7100)
         case .database: Color(hex: 0xc925d1)
         case .integration: Color(hex: 0xe7157b)
+        case .messaging: Color(hex: 0x2e73b8)
         case .storage: Color(hex: 0x7aa116)
         case .media: Color(hex: 0x01a88d)
         }
     }
 }
 
-enum Role { case viewers, router, firewall, cdn, compute, cache, queue, database, origin, encoder }
+enum Role {
+    case viewers, dns, router, firewall, cdn, compute, auth, cache, queue, pubsub, database, search, origin, storage, encoder, processor, notifier
+}
 
 struct Tier: Hashable {
     let name: String
-    /// Capacity of one unit in the role's main traffic class (Gbps for video, req/s or ops/s otherwise).
+    /// Capacity of one unit in the role's main traffic class (Gbps for video, per second otherwise).
     let capacity: Double
     /// On-demand price of one unit for a full month (730 h).
     let monthly: Double
 }
 
 enum ServiceKind: String, Codable, CaseIterable, Identifiable {
-    case viewers, route53, cloudFront, globalAccelerator, alb, nlb, waf, apiGateway
-    case ec2, ecs, fargate, eks, lambda, appRunner
-    case elastiCache, dax, dynamoDB, aurora, auroraDSQL, rds, memoryDB
-    case sqs, kinesis, s3, mediaLive, mediaPackage, ivs
+    case viewers, route53, cloudFront, globalAccelerator, alb, nlb, apiGateway, appSync
+    case waf, cognito
+    case ec2, ecs, fargate, eks, lambda, appRunner, stepFunctions
+    case elastiCache, dax, dynamoDB, aurora, auroraDSQL, rds, memoryDB, neptune, openSearch
+    case sqs, sns, eventBridge, kinesis, msk, firehose
+    case ses, endUserMessaging
+    case s3, mediaLive, mediaPackage, ivs, mediaConvert
     var id: String { rawValue }
     var spec: ServiceSpec { ServiceSpec.all[self]! }
     static var buildable: [ServiceKind] { allCases.filter { $0 != .viewers } }
@@ -97,31 +116,33 @@ struct ServiceSpec {
     var builtInLive = false
     /// Flat monthly charge on top of the per-unit price (e.g. the EKS control plane).
     var baseMonthly = 0.0
+    /// S3 only: uploads (PUTs) per second per unit, alongside its video capacity.
+    var uploadCapacity = 0.0
 
     var color: Color { category.color }
 
     // Approximate us-east-1 on-demand list prices.
     static let all: [ServiceKind: ServiceSpec] = [
-        .viewers: ServiceSpec(name: "Viewers", category: .networking, symbol: "person.3.fill", role: .viewers, unit: "",
-                              blurb: "Everyone tuning in. Every viewer pulls a live video stream and sends a heartbeat API call every 30 s; joining costs ~20 API calls.",
+        .viewers: ServiceSpec(name: "Users", category: .networking, symbol: "person.3.fill", role: .viewers, unit: "",
+                              blurb: "Everyone using your product at once. What they send — video, API calls, sign-ins, uploads — depends on the event.",
                               tiers: [Tier(name: "Internet", capacity: .infinity, monthly: 0)], maxCount: 1, defaultCount: 1),
-        .route53: ServiceSpec(name: "Route 53", category: .networking, symbol: "globe", role: .router, unit: "hosted zone",
-                              blurb: "DNS. Points viewers at your CloudFront distribution. Scales without limits.",
+        .route53: ServiceSpec(name: "Route 53", category: .networking, symbol: "globe", role: .dns, unit: "hosted zone",
+                              blurb: "DNS. Resolves your domain to CloudFront, a load balancer or Global Accelerator. Scales without limits.",
                               tiers: [Tier(name: "Hosted zone + health checks", capacity: .infinity, monthly: 25)], maxCount: 1, defaultCount: 1),
         .cloudFront: ServiceSpec(name: "CloudFront", category: .networking, symbol: "bolt.horizontal.fill", role: .cdn, unit: "× 10 Tbps quota",
-                                 blurb: "CDN with 600+ edge locations. Caches ~98% of live video segments and 15% of API calls. Default quota is tiny for an event this size — request more bandwidth. Origin Shield collapses misses to 0.3%.",
+                                 blurb: "CDN with 600+ edge locations. Caches ~98% of video and the cacheable share of API calls (product pages, feeds). Forwards uploads to S3. Default quota is tiny for big events — request more bandwidth. Origin Shield collapses misses to 0.3%.",
                                  tiers: [Tier(name: "10 Tbps bandwidth quota", capacity: 10_000, monthly: 0)], maxCount: 60, defaultCount: 1),
         .waf: ServiceSpec(name: "WAF + Shield", category: .security, symbol: "shield.lefthalf.filled", role: .firewall, unit: "web ACL",
-                          blurb: "Blocks bots, credential stuffing and DDoS. Big events attract up to 25% junk API traffic that otherwise hits your servers.",
+                          blurb: "Attach it to CloudFront, a load balancer, API Gateway or AppSync (drag its ⊕ onto them). Blocks bots, scalpers, credential stuffing and DDoS before they reach your servers.",
                           tiers: [Tier(name: "Web ACL + Shield Advanced", capacity: 5_000_000, monthly: 3_020)], maxCount: 1, defaultCount: 1),
         .alb: ServiceSpec(name: "Application LB", category: .networking, symbol: "arrow.triangle.branch", role: .router, unit: "pre-warmed ALB",
-                          blurb: "Application Load Balancer. Spreads API traffic across every instance behind it. Each pre-warmed ALB handles ~100k req/s.",
+                          blurb: "Application Load Balancer. Spreads API and sign-in traffic across EC2, ECS, EKS or Lambda targets behind it. Each pre-warmed ALB handles ~100k req/s.",
                           tiers: [Tier(name: "ALB · 100k req/s pre-warmed", capacity: 100_000, monthly: 22)], maxCount: 50, defaultCount: 1),
         .apiGateway: ServiceSpec(name: "API Gateway", category: .integration, symbol: "point.3.connected.trianglepath.dotted", role: .router, unit: "× 10k req/s quota",
                                  blurb: "Managed HTTP API front door. Pay per request. Account throttle defaults to 10k req/s — raise the quota for big events.",
                                  tiers: [Tier(name: "10k req/s throttle quota", capacity: 10_000, monthly: 0)], maxCount: 200, defaultCount: 1),
         .ec2: ServiceSpec(name: "EC2 · Node.js", category: .compute, symbol: "server.rack", role: .compute, unit: "instances",
-                          blurb: "Node.js API servers on Graviton. Handles auth, entitlements, playback sessions and heartbeats. Needs a load balancer to use more than one instance.",
+                          blurb: "Node.js servers on Graviton. Serve the API, or poll a queue as workers. Behind a load balancer every instance takes API traffic; without one only one does.",
                           tiers: [Tier(name: "c7g.large · 2 vCPU", capacity: 2_000, monthly: 52.9),
                                   Tier(name: "c7g.xlarge · 4 vCPU", capacity: 4_000, monthly: 105.9),
                                   Tier(name: "c7g.2xlarge · 8 vCPU", capacity: 8_000, monthly: 211.7),
@@ -134,7 +155,7 @@ struct ServiceSpec {
                                       Tier(name: "2 vCPU · 4 GB", capacity: 4_000, monthly: 57.7)],
                               maxCount: 5_000, defaultCount: 4, schedulable: true, needsLoadBalancer: true),
         .lambda: ServiceSpec(name: "Lambda", category: .compute, symbol: "function", role: .compute, unit: "× 1k concurrency",
-                             blurb: "Functions that scale per request. 1,000 concurrent executions ≈ 20k req/s at 50 ms. Pay per invocation.",
+                             blurb: "Functions that scale per request: behind API Gateway or an ALB, or triggered by SQS, SNS, EventBridge, Kinesis or S3. 1,000 concurrency ≈ 20k req/s at 50 ms.",
                              tiers: [Tier(name: "1,000 concurrency quota", capacity: 20_000, monthly: 0)], maxCount: 100, defaultCount: 1),
         .elastiCache: ServiceSpec(name: "ElastiCache Valkey", category: .database, symbol: "memorychip.fill", role: .cache, unit: "shards",
                                   blurb: "In-memory cache (Valkey, the open-source Redis successor). Serves 90% of reads — sessions, entitlements, profiles — before they reach the database.",
@@ -153,7 +174,7 @@ struct ServiceSpec {
                                      Tier(name: "db.r7g.4xlarge", capacity: 40_000, monthly: 1_520)],
                              maxCount: 16, defaultCount: 1, singleWriter: true),
         .sqs: ServiceSpec(name: "SQS", category: .integration, symbol: "tray.full.fill", role: .queue, unit: "queue",
-                          blurb: "Queue that absorbs write bursts (watch progress, analytics). The database drains it at a steady ~35% of the peak rate.",
+                          blurb: "Message queue. Absorbs bursts of events or writes; consumers (Lambda, ECS, EC2 workers) drain it at a steady ~35% of the peak rate. Nearly unlimited throughput.",
                           tiers: [Tier(name: "Standard queue", capacity: .infinity, monthly: 0)], maxCount: 1, defaultCount: 1),
 
         // Networking
@@ -206,16 +227,68 @@ struct ServiceSpec {
 
         // Streaming
         .kinesis: ServiceSpec(name: "Kinesis Streams", category: .integration, symbol: "water.waves", role: .queue, unit: "streams",
-                              blurb: "On-demand data stream for heartbeats and analytics events. Absorbs write bursts like SQS; ~200k records/s per stream.",
+                              blurb: "On-demand data stream for clicks, views and analytics events. Consumers like Lambda or Firehose read it in order; ~200k records/s per stream.",
                               tiers: [Tier(name: "On-demand stream", capacity: 200_000, monthly: 29)], maxCount: 50, defaultCount: 1),
 
+        // Front doors & identity
+        .appSync: ServiceSpec(name: "AppSync", category: .networking, symbol: "arrow.triangle.2.circlepath", role: .compute, unit: "× 10k req/s quota",
+                              blurb: "Managed GraphQL and real-time API. Resolvers talk straight to DynamoDB, Lambda or Aurora — no servers or load balancer. Pay per request.",
+                              tiers: [Tier(name: "10k req/s quota", capacity: 10_000, monthly: 0)], maxCount: 100, defaultCount: 1),
+        .cognito: ServiceSpec(name: "Cognito", category: .security, symbol: "person.badge.key.fill", role: .auth, unit: "× 1k sign-ins/s quota",
+                              blurb: "User sign-up and sign-in. Apps call it directly, so logins never touch your servers. Sign-in rate is a quota — raise it before a launch. Priced per monthly active user.",
+                              tiers: [Tier(name: "1k sign-ins/s quota", capacity: 1_000, monthly: 0)], maxCount: 100, defaultCount: 1),
+
+        // Workflows
+        .stepFunctions: ServiceSpec(name: "Step Functions", category: .integration, symbol: "flowchart.fill", role: .compute, unit: "× 6k starts/s quota",
+                                    blurb: "Express workflows that orchestrate an order or upload end to end: call services, retry, then write results and send notifications. Triggered by EventBridge or API Gateway.",
+                                    tiers: [Tier(name: "Express · 6k starts/s quota", capacity: 6_000, monthly: 0)], maxCount: 50, defaultCount: 1),
+
+        // Data
+        .neptune: ServiceSpec(name: "Neptune", category: .database, symbol: "circle.hexagongrid.fill", role: .database, unit: "instances",
+                              blurb: "Graph database for follows, friends and recommendations. Extra instances are read replicas — one writer.",
+                              tiers: [Tier(name: "db.r6g.large", capacity: 8_000, monthly: 254),
+                                      Tier(name: "db.r6g.2xlarge", capacity: 32_000, monthly: 1_016)],
+                              maxCount: 16, defaultCount: 2, singleWriter: true),
+        .openSearch: ServiceSpec(name: "OpenSearch", category: .database, symbol: "magnifyingglass", role: .search, unit: "data nodes",
+                                 blurb: "Search and browse: product search, hashtags, feeds. Handles reads only — writes must still land in a database.",
+                                 tiers: [Tier(name: "r7g.large.search", capacity: 3_000, monthly: 122),
+                                         Tier(name: "r7g.2xlarge.search", capacity: 12_000, monthly: 488)],
+                                 maxCount: 200, defaultCount: 3, schedulable: true),
+
+        // Messaging & events
+        .sns: ServiceSpec(name: "SNS", category: .integration, symbol: "megaphone.fill", role: .pubsub, unit: "× 30k msgs/s quota",
+                          blurb: "Pub/sub. Every subscriber (SQS queues, Lambda, Firehose) gets its own copy of each event — classic fan-out. Also delivers mobile push, SMS and email.",
+                          tiers: [Tier(name: "Standard topic · 30k/s quota", capacity: 30_000, monthly: 0)], maxCount: 50, defaultCount: 1),
+        .eventBridge: ServiceSpec(name: "EventBridge", category: .integration, symbol: "antenna.radiowaves.left.and.right", role: .pubsub, unit: "× 10k events/s quota",
+                                  blurb: "Event bus. Rules route each event to every matching target: Lambda, SQS, SNS, Step Functions, Firehose. PutEvents quota is 10k/s by default.",
+                                  tiers: [Tier(name: "Event bus · 10k/s quota", capacity: 10_000, monthly: 0)], maxCount: 50, defaultCount: 1),
+        .msk: ServiceSpec(name: "MSK (Kafka)", category: .integration, symbol: "rectangle.3.group.fill", role: .queue, unit: "Express brokers",
+                          blurb: "Managed Apache Kafka. Durable, replayable event log for very high throughput. Consumers: Lambda, ECS/EKS workers, Firehose.",
+                          tiers: [Tier(name: "express.m7g.large", capacity: 30_000, monthly: 298),
+                                  Tier(name: "express.m7g.xlarge", capacity: 60_000, monthly: 596)],
+                          maxCount: 30, defaultCount: 3),
+        .firehose: ServiceSpec(name: "Data Firehose", category: .integration, symbol: "flame.fill", role: .processor, unit: "streams",
+                               blurb: "Loads event streams into S3, Redshift or OpenSearch for analytics. A sink: views, clicks and likes end here.",
+                               tiers: [Tier(name: "Delivery stream · 500k records/s", capacity: 500_000, monthly: 0)], maxCount: 20, defaultCount: 1),
+
+        // Customer messaging
+        .ses: ServiceSpec(name: "SES", category: .messaging, symbol: "envelope.fill", role: .notifier, unit: "× 1k emails/s quota",
+                          blurb: "Simple Email Service: order confirmations, receipts, password resets. Sending rate is a quota you raise before big sales.",
+                          tiers: [Tier(name: "1k emails/s quota", capacity: 1_000, monthly: 0)], maxCount: 100, defaultCount: 1),
+        .endUserMessaging: ServiceSpec(name: "End User Messaging", category: .messaging, symbol: "bell.badge.fill", role: .notifier, unit: "× 25k msgs/s quota",
+                                       blurb: "AWS End User Messaging (Pinpoint's successor for push and SMS): mobile push and SMS at high rates.",
+                                       tiers: [Tier(name: "Push/SMS · 25k/s quota", capacity: 25_000, monthly: 0)], maxCount: 100, defaultCount: 1),
+
         // Media
+        .mediaConvert: ServiceSpec(name: "MediaConvert", category: .media, symbol: "wand.and.stars", role: .processor, unit: "reserved slots",
+                                   blurb: "Transcodes uploaded videos into streaming formats. Each reserved slot finishes ~20 short clips per second. Triggered by Lambda, Step Functions or EventBridge.",
+                                   tiers: [Tier(name: "Reserved transcode slot", capacity: 20, monthly: 400)], maxCount: 500, defaultCount: 5),
         .ivs: ServiceSpec(name: "IVS", category: .media, symbol: "play.tv.fill", role: .origin, unit: "× 100k viewers quota",
                           blurb: "Amazon Interactive Video Service: ingest, encoding and global delivery in one. Point viewers straight at it — no MediaLive or CloudFront needed. Priced per viewer-hour.",
                           tiers: [Tier(name: "Standard channel · ~400 Gbps quota", capacity: 400, monthly: 0)], maxCount: 50, defaultCount: 1, builtInLive: true),
-        .s3: ServiceSpec(name: "S3", category: .storage, symbol: "archivebox.fill", role: .origin, unit: "buckets",
-                         blurb: "Object storage. Can act as a video origin if MediaLive writes HLS segments into it. ~100 Gbps per bucket.",
-                         tiers: [Tier(name: "Bucket", capacity: 100, monthly: 25)], maxCount: 50, defaultCount: 1),
+        .s3: ServiceSpec(name: "S3", category: .storage, symbol: "archivebox.fill", role: .storage, unit: "buckets",
+                         blurb: "Object storage. Origin for on-demand video and images behind CloudFront, and the landing spot for user uploads. Sends an event per upload to SQS, SNS, EventBridge or Lambda.",
+                         tiers: [Tier(name: "Bucket · 100 Gbps · 35k PUT/s", capacity: 100, monthly: 25)], maxCount: 50, defaultCount: 1, uploadCapacity: 35_000),
         .mediaLive: ServiceSpec(name: "MediaLive", category: .media, symbol: "video.fill", role: .encoder, unit: "channels",
                                 blurb: "Live encoder. Takes the camera feed from the arena and encodes the adaptive-bitrate stream. Connect it to an origin.",
                                 tiers: [Tier(name: "HD channel · 2 pipelines", capacity: 1, monthly: 3_100)], maxCount: 4, defaultCount: 1),
@@ -226,120 +299,95 @@ struct ServiceSpec {
 }
 
 extension ServiceKind {
+    /// Traffic a service takes in.
     func accepts(_ c: TrafficClass) -> Bool {
         switch spec.role {
-        case .viewers, .encoder: false
-        case .router: self == .route53 ? (c == .video || c == .api) : c == .api
-        case .firewall, .cdn: c == .video || c == .api
-        case .compute: c == .api
-        case .cache: c == .reads
-        case .queue: c == .writes
+        case .viewers, .encoder, .firewall: false
+        case .dns, .cdn: [.video, .api, .auth, .uploads].contains(c)
+        case .router: c == .api || c == .auth
+        case .compute:
+            switch self {
+            case .appSync, .appRunner: c == .api || c == .auth
+            case .stepFunctions: c == .api || c == .events
+            default: c == .api || c == .auth || c == .events
+            }
+        case .auth: c == .auth
+        case .cache, .search: c == .reads
+        case .queue: c == .writes || c == .events
+        case .pubsub: self == .sns ? (c == .events || c == .notifications) : c == .events
         case .database: c == .reads || c == .writes
         case .origin: c == .video
+        case .storage: c == .video || c == .uploads
+        case .processor: c == .events
+        case .notifier: c == .notifications
+        }
+    }
+
+    /// Traffic a service can send on (used to decide which connections make sense).
+    var emits: Set<TrafficClass> {
+        switch spec.role {
+        case .viewers: [.video, .api, .auth, .uploads]
+        case .dns, .cdn: [.video, .api, .auth, .uploads]
+        case .router: [.api, .auth]
+        case .compute: [.reads, .writes, .events, .notifications]
+        case .cache: [.reads]
+        case .queue: [.writes, .events]
+        case .pubsub: [.events]
+        case .storage: [.events]
+        case .encoder: [.video]
+        case .auth, .database, .search, .origin, .processor, .notifier, .firewall: []
         }
     }
 
     /// When a service sends traffic to several children, the highest priority ones get it.
     func priority(_ c: TrafficClass) -> Int {
         switch spec.role {
-        case .router where self == .route53: 4
+        case .auth: 5
+        case .dns: 4
         // An accelerator is added specifically to carry API traffic, so it wins over the CDN.
-        case .firewall, .router where self == .globalAccelerator: 3
+        case .router where self == .globalAccelerator: 3
         case .cdn: 2
-        case .cache, .queue: 2
+        case .cache, .search: 2
+        case .queue, .pubsub: 2
         default: 1
         }
     }
 
     var isLoadBalancer: Bool { self == .alb || self == .nlb || self == .apiGateway }
-}
 
-enum Difficulty: String {
-    case tutorial = "Tutorial", easy = "Easy", medium = "Medium", hard = "Hard"
-
-    var color: Color {
-        switch self {
-        case .tutorial: Color(hex: 0x6cb6ff)
-        case .easy: Theme.greenHi
-        case .medium: Theme.yellow
-        case .hard: Theme.red
+    /// Why a connection from `self` to `target` isn't possible in AWS, or nil when it is.
+    func linkProblem(to target: ServiceKind) -> String? {
+        let a = spec, b = target.spec
+        if target == .viewers { return "Users only send traffic." }
+        if self == .waf {
+            return [.cloudFront, .alb, .apiGateway, .appSync].contains(target) ? nil
+                : "WAF attaches to CloudFront, an Application LB, API Gateway or AppSync."
         }
+        if target == .waf { return "WAF isn't a hop — drag from WAF's ⊕ onto what it should protect." }
+        if self == .mediaLive {
+            return target == .mediaPackage || target == .s3 ? nil : "MediaLive pushes its encoded stream to MediaPackage or S3."
+        }
+        if target == .mediaLive { return "MediaLive takes the camera feed, not traffic from \(a.name)." }
+        if target == .cognito && self != .viewers { return "Apps sign in with Cognito directly — connect Users → Cognito." }
+        if self == .s3 && ![.sqs, .sns, .eventBridge, .lambda].contains(target) {
+            return "S3 event notifications go to SQS, SNS, EventBridge or Lambda."
+        }
+        if (self == .sqs || self == .kinesis || self == .msk) && [.appRunner, .appSync, .stepFunctions, .sns, .eventBridge, .sqs].contains(target) {
+            return "\(b.name) can't consume from \(a.name). Use Lambda, EC2, ECS, EKS or Firehose."
+        }
+        if self == .sns && ![.sqs, .lambda, .firehose, .ec2, .ecs, .fargate, .eks].contains(target) {
+            return "SNS delivers to SQS, Lambda, Firehose or HTTPS endpoints (EC2/ECS/EKS)."
+        }
+        if target == .mediaConvert && ![.lambda, .stepFunctions, .eventBridge].contains(self) {
+            return "MediaConvert jobs are started by Lambda, Step Functions or EventBridge."
+        }
+        if target == .ivs && self != .viewers && a.role != .dns { return "Viewers play IVS streams directly." }
+        if emits.isDisjoint(with: TrafficClass.allCases.filter { target.accepts($0) }) {
+            let sends = emits.map(\.noun).sorted().joined(separator: ", ")
+            let takes = TrafficClass.allCases.filter { target.accepts($0) }.map(\.noun).joined(separator: ", ")
+            if sends.isEmpty { return "\(a.name) is a final stop — it doesn't send traffic on." }
+            return "\(a.name) sends \(sends); \(b.name) takes \(takes.isEmpty ? "nothing" : takes)."
+        }
+        return nil
     }
-}
-
-/// A guided tutorial step, checked off automatically when the design satisfies it.
-struct TutorialStep {
-    let title: String
-    let hint: String
-    /// Service to feature at the top of the Add service list during this step.
-    var suggested: ServiceKind?
-    let done: (Design) -> Bool
-}
-
-struct Mission: Identifiable {
-    let id: String
-    let difficulty: Difficulty
-    let title: String
-    let tagline: String
-    let brief: String
-    let mainEvent: String
-    let peakViewers: Double
-    let bitrateMbps: Double
-    let eventHours: Double
-    /// Monthly budget for three stars.
-    let budget: Double
-    /// Whether viewers also hit your API (logins, heartbeats). The tutorial is video only.
-    var hasAPI = true
-    /// API calls each new viewer makes when joining (login, entitlements, manifest…).
-    var joinCalls = 20.0
-    /// Share of extra bot traffic during the main-event surge.
-    var surgeBots = 0.25
-    /// Real seconds one event takes at 1×.
-    var realSeconds = 75.0
-    var steps: [TutorialStep] = []
-
-    var isTutorial: Bool { !steps.isEmpty }
-
-    static let all: [Mission] = [
-        Mission(id: "tutorial", difficulty: .tutorial, title: "First Stream", tagline: "Tutorial · 1k viewers",
-                brief: "A local boxing gym streams its sparring night to 1,000 fans. Video only — no logins, no databases. Learn the three services every live stream on AWS needs.",
-                mainEvent: "Sparring night", peakViewers: 1_000, bitrateMbps: 3, eventHours: 1, budget: 4_000,
-                hasAPI: false, joinCalls: 0, surgeBots: 0, realSeconds: 40, steps: tutorialSteps),
-        Mission(id: "premiere", difficulty: .easy, title: "Indie Premiere", tagline: "Easy · 50k viewers",
-                brief: "A documentary premieres live and 50,000 fans tune in. Now viewers log in and send heartbeats too, so you'll need servers and a database behind the video. No bots, gentle arrivals.",
-                mainEvent: "Premiere", peakViewers: 50_000, bitrateMbps: 4, eventHours: 2, budget: 9_000,
-                joinCalls: 5, surgeBots: 0, realSeconds: 60),
-        Mission(id: "esports", difficulty: .medium, title: "Esports Final", tagline: "Medium · 2M viewers",
-                brief: "Two million fans pile in for the grand final. CloudFront's quota, a single Aurora writer and a burst of logins at the opening ceremony will all bite. Some bots show up too.",
-                mainEvent: "Grand final", peakViewers: 2_000_000, bitrateMbps: 5, eventHours: 3, budget: 200_000,
-                joinCalls: 12, surgeBots: 0.1),
-        Mission(id: "paul-tyson", difficulty: .hard, title: "Paul vs Tyson", tagline: "Hard · 60M viewers",
-                brief: "Jake Paul vs Mike Tyson streams live worldwide — the real fight peaked at about 60 million concurrent streams. They all hit play at the walkout — and they all log in at once, with a wave of bots behind them. Last time, the stream buckled. Design an AWS architecture that survives the spike.",
-                mainEvent: "Paul vs Tyson", peakViewers: 60_000_000, bitrateMbps: 5, eventHours: 3, budget: 5_500_000),
-    ]
-
-    private static func has(_ d: Design, _ from: ServiceKind, _ to: ServiceKind) -> Bool {
-        d.edges.contains { e in d.node(e.from)?.kind == from && d.node(e.to)?.kind == to }
-    }
-
-    static let tutorialSteps: [TutorialStep] = [
-        TutorialStep(title: "Add CloudFront",
-                     hint: "Tap Add service → CloudFront. It's a CDN: it keeps copies of the video close to every viewer.",
-                     suggested: .cloudFront,
-                     done: { d in d.nodes.contains { $0.kind == .cloudFront } }),
-        TutorialStep(title: "Connect Viewers → CloudFront",
-                     hint: "Drag the green ⊕ on Viewers and drop it on CloudFront. Arrows show which way traffic flows.",
-                     done: { d in has(d, .viewers, .cloudFront) }),
-        TutorialStep(title: "Give CloudFront an origin",
-                     hint: "Select CloudFront, then Add service → MediaPackage. CloudFront fetches new video segments from it.",
-                     suggested: .mediaPackage,
-                     done: { d in has(d, .cloudFront, .mediaPackage) }),
-        TutorialStep(title: "Feed the origin with MediaLive",
-                     hint: "Add MediaLive, then drag its ⊕ onto MediaPackage. MediaLive encodes the camera feed from the gym.",
-                     suggested: .mediaLive,
-                     done: { d in has(d, .mediaLive, .mediaPackage) }),
-        TutorialStep(title: "Survive the stream",
-                     hint: "Everything is green. Let the event run to the end — try 4× speed.",
-                     done: { _ in false }),
-    ]
 }

@@ -8,8 +8,10 @@ struct PaletteSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    if let anchor = store.selected, anchor.spec.role != .database, anchor.spec.role != .origin {
-                        Banner(text: "Adds after \(anchor.title) and connects it automatically.", color: Theme.green, icon: "link")
+                    if let e = store.edge, let a = store.design.node(e.from), let b = store.design.node(e.to) {
+                        Banner(text: "Inserts between \(a.title) and \(b.title) when the connections make sense.", color: Theme.green, icon: "link")
+                    } else if let anchor = store.selected, !anchor.kind.emits.isEmpty {
+                        Banner(text: "Adds after \(anchor.title) and connects it when that's a real AWS connection.", color: Theme.green, icon: "link")
                     }
                     if store.mission.steps.indices.contains(store.tutorialStep), let kind = store.mission.steps[store.tutorialStep].suggested {
                         VStack(alignment: .leading, spacing: 8) {
@@ -99,8 +101,8 @@ struct MissionsSheet: View {
                         .foregroundStyle(Theme.yellow)
                     }
                 }
-                Text("\(Fmt.viewers(m.peakViewers)) viewers · \(Int(m.bitrateMbps)) Mbps · \(Int(m.eventHours)) h event").font(.system(size: 12, weight: .bold)).foregroundStyle(m.difficulty.color)
-                Text(unlocked ? m.brief : "Clear \(previous(m)?.title ?? "the previous event") to unlock.").font(.system(size: 13)).foregroundStyle(Theme.soft).multilineTextAlignment(.leading)
+                Text("\(Fmt.viewers(m.peakUsers)) \(m.audience) · \(Int(m.eventHours)) h event").font(.system(size: 12, weight: .bold)).foregroundStyle(m.difficulty.color)
+                Text(unlocked ? m.brief : "Clear \(previous(m)?.title ?? "the tutorial") to unlock.").font(.system(size: 13)).foregroundStyle(Theme.soft).multilineTextAlignment(.leading)
                 if unlocked {
                     Text("★★★ budget \(Fmt.money(m.budget))/mo").font(.system(size: 11, weight: .semibold)).foregroundStyle(Theme.muted)
                 }
@@ -116,15 +118,20 @@ struct MissionsSheet: View {
     }
 
     private func previous(_ m: Mission) -> Mission? {
-        guard let i = Mission.all.firstIndex(where: { $0.id == m.id }), i > 0 else { return nil }
-        return Mission.all[i - 1]
+        let track = Mission.all.filter { $0.track == m.track }
+        guard let i = track.firstIndex(where: { $0.id == m.id }), i > 0 else { return Mission.all.first { $0.track == .basics } }
+        return track[i - 1]
     }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 10) {
-                    ForEach(Mission.all) { m in missionCard(m) }
+                    ForEach(Track.allCases, id: \.self) { track in
+                        Text(track.rawValue.uppercased()).font(.system(size: 11, weight: .bold)).tracking(0.6).foregroundStyle(Theme.muted)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                        ForEach(Mission.all.filter { $0.track == track }) { m in missionCard(m) }
+                    }
                     HStack(spacing: 8) {
                         Button { dismiss(); onBrief() } label: { Label("Mission brief", systemImage: "doc.text") }
                             .buttonStyle(SecondaryButtonStyle())
@@ -196,7 +203,7 @@ struct CostSheet: View {
                     }
                 }
                 Section {
-                    Text("Approximate us-east-1 list prices. Assumes one \(Int(store.mission.eventHours)) h event per month at \(Int(store.mission.bitrateMbps)) Mbps. CloudFront data transfer at the 5 PB+ tier ($0.02/GB) — at this scale it dominates the bill, which is why streamers negotiate private CDN pricing.")
+                    Text("Approximate us-east-1 list prices. Assumes one \(Int(store.mission.eventHours)) h event per month. CloudFront data transfer at the 5 PB+ tier ($0.02/GB) — for video at this scale it dominates the bill, which is why big streamers negotiate private CDN pricing.")
                         .font(.system(size: 12)).foregroundStyle(Theme.muted)
                         .listRowBackground(Color.clear)
                 }
@@ -279,8 +286,8 @@ struct VictoryCard: View {
         VStack(spacing: 14) {
             Image(systemName: "checkmark").font(.system(size: 26, weight: .heavy))
                 .frame(width: 60, height: 60).background(Circle().fill(Theme.green))
-            Text("The stream held!").font(.system(size: 24, weight: .heavy))
-            Text("Every viewer got \(store.mission.mainEvent) without buffering.").font(.system(size: 14)).foregroundStyle(Theme.soft).multilineTextAlignment(.center)
+            Text("It held!").font(.system(size: 24, weight: .heavy))
+            Text("Every one of your \(store.mission.audience) got through \(store.mission.mainEvent).").font(.system(size: 14)).foregroundStyle(Theme.soft).multilineTextAlignment(.center)
             HStack(spacing: 6) {
                 ForEach(0..<3) { i in Image(systemName: i < victory.stars ? "star.fill" : "star").font(.system(size: 28, weight: .bold)) }
             }
@@ -309,10 +316,7 @@ struct VictoryCard: View {
         .frame(maxWidth: 460)
     }
 
-    private var nextMission: Mission? {
-        guard let i = Mission.all.firstIndex(where: { $0.id == store.mission.id }), i + 1 < Mission.all.count else { return nil }
-        return Mission.all[i + 1]
-    }
+    private var nextMission: Mission? { store.nextMission }
 
     private func stat(_ title: String, _ value: String) -> some View {
         VStack(spacing: 2) {

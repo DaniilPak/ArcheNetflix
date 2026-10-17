@@ -24,12 +24,17 @@ struct ContentView: View {
                     Spacer()
                     VStack(spacing: 8) {
                         if showLog { LogPanel(store: store).transition(.move(edge: .bottom).combined(with: .opacity)) }
-                        if let hint = store.hint, store.selection == nil {
+                        if let hint = store.hint, store.selection == nil, store.selectedEdge == nil {
                             HintCard(store: store, hint: hint).transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                         if let node = store.selected {
                             Inspector(store: store, node: node)
                                 .id(node.id)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                        if let edge = store.edge {
+                            EdgeInspector(store: store, edge: edge, onInsert: { showPalette = true })
+                                .id(edge.id)
                                 .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                         BottomBar(store: store, showLog: $showLog, onAdd: { showPalette = true })
@@ -40,8 +45,9 @@ struct ContentView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 4)
                 .animation(.easeOut(duration: 0.2), value: store.selection)
+                .animation(.easeOut(duration: 0.2), value: store.selectedEdge)
                 .animation(.easeOut(duration: 0.2), value: store.toast)
-                .animation(.easeOut(duration: 0.2), value: store.hint)
+                .animation(.easeOut(duration: 0.2), value: store.hint?.id)
 
                 if let victory = store.victory {
                     Color.black.opacity(0.55).ignoresSafeArea().transition(.opacity)
